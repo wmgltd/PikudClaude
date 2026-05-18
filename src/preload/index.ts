@@ -128,6 +128,8 @@ const api = {
   getStatuses: (): Promise<Record<string, SessionStatus>> =>
     ipcRenderer.invoke('tmux:get-statuses'),
   captureLive: (id: string): Promise<string> => ipcRenderer.invoke('tmux:capture-live', id),
+  captureScrollback: (id: string): Promise<string> =>
+    ipcRenderer.invoke('tmux:capture-scrollback', id),
   onSessionStatus: (handler: (id: string, status: SessionStatus) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, id: string, status: SessionStatus) =>
       handler(id, status)

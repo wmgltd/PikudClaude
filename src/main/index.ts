@@ -143,6 +143,10 @@ function wireIpc(): void {
 
   ipcMain.handle('tmux:capture-live', (_e, id: string) => manager.captureLive(id))
 
+  ipcMain.handle('tmux:capture-scrollback', (_e, id: string) =>
+    manager.captureSnapshot(id, 10000)
+  )
+
   ipcMain.handle('dialog:pick-directory', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],

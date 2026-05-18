@@ -10,6 +10,7 @@ import { BookmarksPanel } from './components/BookmarksPanel'
 import { SettingsDialog } from './components/SettingsDialog'
 import { UpdateAvailableDialog } from './components/UpdateAvailableDialog'
 import { WelcomeDialog } from './components/WelcomeDialog'
+import { ScrollbackOverlay } from './components/ScrollbackOverlay'
 import type { SessionMeta, SessionStatus, Settings } from './types'
 import { resolveTheme } from './types'
 
@@ -141,6 +142,7 @@ export function App(): JSX.Element {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
   const [showBookmarks, setShowBookmarks] = useState(false)
+  const [showScrollback, setShowScrollback] = useState(false)
   const [bookmarksRefresh, setBookmarksRefresh] = useState(0)
   const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({})
   const [unseen, setUnseen] = useState<Set<string>>(new Set())
@@ -482,6 +484,12 @@ export function App(): JSX.Element {
         return
       }
       if (modalOpen) return
+      if (e.shiftKey && e.key.toLowerCase() === 'c') {
+        e.preventDefault()
+        if (!activeIdRef.current) return
+        setShowScrollback((v) => !v)
+        return
+      }
       if (!e.shiftKey && e.key.toLowerCase() === 'b') {
         e.preventDefault()
         const id = activeIdRef.current
@@ -605,7 +613,11 @@ export function App(): JSX.Element {
         setShowBookmarks(true)
       })
     }},
-    { id: 'toggle-bookmarks', label: showBookmarks ? 'Hide bookmarks panel' : 'Show bookmarks panel', run: () => setShowBookmarks((v) => !v) }
+    { id: 'toggle-bookmarks', label: showBookmarks ? 'Hide bookmarks panel' : 'Show bookmarks panel', run: () => setShowBookmarks((v) => !v) },
+    { id: 'view-scrollback', label: 'View scrollback (selectable text)', hint: '⌘⇧C', run: () => {
+      if (!activeIdRef.current) return
+      setShowScrollback(true)
+    }}
   ]
 
   const gridCols = showBookmarks
@@ -739,6 +751,9 @@ export function App(): JSX.Element {
           onSelectSession={setActiveId}
           mode={paletteMode}
         />
+      )}
+      {showScrollback && activeId && (
+        <ScrollbackOverlay sessionId={activeId} onClose={() => setShowScrollback(false)} />
       )}
       {!settings.ui.welcomeShown && (
         <WelcomeDialog

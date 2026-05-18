@@ -589,6 +589,8 @@ export function SettingsDialog({ initial, onSave, onCancel, onTestSound, onShowO
               <div>Find in active terminal</div>
               <div className="shortcut-keys"><kbd>⌘B</kbd></div>
               <div>Bookmark current point</div>
+              <div className="shortcut-keys"><kbd>⌘⇧C</kbd></div>
+              <div>View scrollback (selectable text)</div>
               <div className="shortcut-keys"><kbd>⌘,</kbd></div>
               <div>Settings</div>
 
