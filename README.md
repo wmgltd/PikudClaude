@@ -8,11 +8,18 @@ PikudClaude is a macOS desktop app that lets you orchestrate many Claude Code se
   <img src="https://pikud.io/assets/terminal-demo.svg" alt="Animated PikudClaude demo: type in one project, switch to another, ask in Hebrew, read a Hebrew + English answer, open Settings" width="100%" />
 </p>
 
-## Latest release — v0.2.6
+## Latest release — v0.2.7
 
-[Download `PikudClaude-0.2.6-arm64.dmg`](https://github.com/wmgltd/PikudClaude/releases/tag/v0.2.6) (macOS Apple Silicon, signed + notarized) · landing page at [pikud.io](https://pikud.io).
+[Download `PikudClaude-0.2.7-arm64.dmg`](https://github.com/wmgltd/PikudClaude/releases/tag/v0.2.7) (macOS Apple Silicon, signed + notarized) · landing page at [pikud.io](https://pikud.io).
 
-**What's new — copy & Ctrl+C behavior**
+**What's new — full-scrollback selection + usage strip fix**
+- **`⌘⇧C` opens a scrollback overlay** with the entire tmux history rendered as plain text — drag to select across many pages, double/triple-click, `⌘C` to copy. Works around xterm.js's viewport-only selection so you can finally grab text that scrolled past one screen.
+- **Usage strip now works in packaged builds.** macOS GUI apps get a minimal `PATH` (`/usr/bin:/bin:…`) that doesn't include `npx`, so `ccusage` never ran and the bottom-left strip always said "no active usage". The app now resolves the real interactive-login-shell `PATH` on first call and reuses it.
+
+## Earlier — v0.2.6
+
+[Download `PikudClaude-0.2.6-arm64.dmg`](https://github.com/wmgltd/PikudClaude/releases/tag/v0.2.6).
+
 - **No more auto-copy on mouse select.** Selecting text in the terminal used to silently overwrite the clipboard on `mouseup`. Now selection stays as just selection — press `⌘C` when you actually want it copied. Matches the convention of every other macOS terminal.
 - **`Ctrl+C` always sends SIGINT.** Previously the copy handler intercepted both `⌘C` and `Ctrl+C`, which meant Ctrl+C silently stopped interrupting Claude whenever you had text highlighted. Now only `⌘C` is intercepted for copy; `Ctrl+C` is always passed through.
 
