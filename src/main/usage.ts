@@ -53,6 +53,15 @@ let cachedPath: string | null = null
 async function resolveUserPath(): Promise<string> {
   if (cachedPath !== null) return cachedPath
 
+  // Windows GUI apps inherit the user PATH from the registry on launch, so
+  // process.env.PATH is already the right thing. Skip the POSIX shell probe
+  // entirely — there's no /bin/zsh to query and the fallback list below is
+  // all Mac/Linux paths that don't apply.
+  if (process.platform === 'win32') {
+    cachedPath = process.env.PATH || ''
+    return cachedPath
+  }
+
   // In dev the inherited PATH is already rich; don't pay the shell cost.
   if (process.env.PATH && process.env.PATH.split(':').length > 5) {
     cachedPath = process.env.PATH

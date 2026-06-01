@@ -12,6 +12,7 @@ import { UpdateAvailableDialog } from './components/UpdateAvailableDialog'
 import { WelcomeDialog } from './components/WelcomeDialog'
 import { ScrollbackOverlay } from './components/ScrollbackOverlay'
 import { Dashboard } from './components/Dashboard'
+import { IS_MAC } from './utils/platform'
 import type { SessionMeta, SessionStatus, Settings } from './types'
 import { resolveTheme } from './types'
 
@@ -542,7 +543,14 @@ export function App(): JSX.Element {
     const modalOpen = showNewDialog || showImportDialog || showPalette || showSettings
     if (modalOpen && !showPalette) return
     const handler = (e: KeyboardEvent) => {
-      if (!e.metaKey || e.ctrlKey || e.altKey) return
+      // On macOS, the app-level modifier is ⌘ (metaKey). On Windows/Linux,
+      // it's Ctrl (ctrlKey). Require the right one for the platform and
+      // reject the wrong one — otherwise Ctrl+letter combos that are
+      // sacred in shells (Ctrl+C, Ctrl+D, Ctrl+R…) would silently get
+      // hijacked on Mac when the user only wanted a shell action.
+      const mod = IS_MAC ? e.metaKey : e.ctrlKey
+      const wrongMod = IS_MAC ? e.ctrlKey : e.metaKey
+      if (!mod || wrongMod || e.altKey) return
 
       if (!e.shiftKey && e.key.toLowerCase() === 'k') {
         e.preventDefault()
@@ -579,7 +587,12 @@ export function App(): JSX.Element {
         })
         return
       }
-      if (!e.shiftKey && (e.code === 'KeyD' || e.key.toLowerCase() === 'd')) {
+      // Dashboard: ⌘D on Mac, Ctrl+Shift+D on Windows (plain Ctrl+D is EOF
+      // in every shell, so we don't dare hijack it without shift).
+      const wantsDashboard = IS_MAC
+        ? !e.shiftKey && (e.code === 'KeyD' || e.key.toLowerCase() === 'd')
+        : e.shiftKey && (e.code === 'KeyD' || e.key.toLowerCase() === 'd')
+      if (wantsDashboard) {
         e.preventDefault()
         setView((v) => (v === 'terminal' ? 'dashboard' : 'terminal'))
         return

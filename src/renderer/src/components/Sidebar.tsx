@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import type { SessionMeta, SessionStatus } from '../types'
 import { basename } from '../utils/path'
+import { IS_MAC } from '../utils/platform'
 
 const SESSION_COLORS = ['#7c3aed', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#ef4444', '#8b5cf6', '#14b8a6']
 
@@ -197,7 +198,7 @@ export function Sidebar({
           aria-selected={view === 'dashboard'}
           className={`sidebar-view-tab ${view === 'dashboard' ? 'active' : ''}`}
           onClick={() => onSetView('dashboard')}
-          title="Dashboard (⌘D)"
+          title={`Dashboard (${IS_MAC ? '⌘D' : 'Ctrl+Shift+D'})`}
         >
           Dashboard
           {awaitingCount > 0 && (

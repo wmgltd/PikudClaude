@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { SessionMeta, SessionStatus } from '../types'
 import { basename } from '../utils/path'
+import { IS_MAC } from '../utils/platform'
 
 interface Props {
   session: SessionMeta | null
@@ -65,7 +66,7 @@ export function TopBar({
         <button
           type="button"
           className="top-bar-view-toggle"
-          title="Toggle dashboard view (⌘D)"
+          title={`Toggle dashboard view (${IS_MAC ? '⌘D' : 'Ctrl+Shift+D'})`}
           onClick={onToggleView}
         >
           {view === 'dashboard' ? '⊞ dashboard' : '⊟ terminal'}
