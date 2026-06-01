@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { appendErrorEntry } from './errorLog'
 
 const execFileAsync = promisify(execFile)
 
@@ -10,6 +11,10 @@ export interface ActiveUsageBlock {
   costUSD: number
   msUntilReset: number
   percentUsed: number | null
+  costPerHour: number | null
+  tokensPerMinute: number | null
+  projectedCost: number | null
+  projectedTokens: number | null
 }
 
 interface CcusageBlock {
@@ -22,6 +27,14 @@ interface CcusageBlock {
   tokenLimitStatus?: {
     limit?: number
     percentUsed?: number
+  }
+  burnRate?: {
+    costPerHour?: number
+    tokensPerMinute?: number
+  }
+  projection?: {
+    totalCost?: number
+    totalTokens?: number
   }
 }
 
@@ -88,7 +101,15 @@ export async function getActiveBlock(): Promise<ActiveUsageBlock | null> {
     const data = JSON.parse(stdout) as { blocks?: CcusageBlock[] }
     const blocks = Array.isArray(data.blocks) ? data.blocks : []
     const active = blocks.find((b) => b.isActive && !b.isGap)
-    if (!active || !active.endTime || !active.startTime) return null
+    if (!active || !active.endTime || !active.startTime) {
+      appendErrorEntry({
+        source: 'main',
+        kind: 'usage:no-active-block',
+        message: 'ccusage ran but returned no active block',
+        context: { blocksCount: blocks.length }
+      })
+      return null
+    }
     const endMs = Date.parse(active.endTime)
     if (!Number.isFinite(endMs)) return null
     const tokens = active.totalTokens ?? 0
@@ -100,9 +121,29 @@ export async function getActiveBlock(): Promise<ActiveUsageBlock | null> {
       totalTokens: tokens,
       costUSD: active.costUSD ?? 0,
       msUntilReset: Math.max(0, endMs - Date.now()),
-      percentUsed: pct
+      percentUsed: pct,
+      costPerHour: active.burnRate?.costPerHour ?? null,
+      tokensPerMinute: active.burnRate?.tokensPerMinute ?? null,
+      projectedCost: active.projection?.totalCost ?? null,
+      projectedTokens: active.projection?.totalTokens ?? null
     }
-  } catch {
+  } catch (err) {
+    // Clear the cached PATH so the next call re-probes. If the shell probe
+    // produced a bogus PATH that doesn't contain npx, we'd otherwise be
+    // stuck failing forever on this single bad cache entry.
+    cachedPath = null
+    const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string }
+    appendErrorEntry({
+      source: 'main',
+      kind: 'usage:ccusage-failed',
+      message: e.message || 'unknown',
+      stack: e.stack,
+      context: {
+        code: e.code,
+        stderr: typeof e.stderr === 'string' ? e.stderr.slice(0, 500) : undefined,
+        stdoutHead: typeof e.stdout === 'string' ? e.stdout.slice(0, 200) : undefined
+      }
+    })
     return null
   }
 }

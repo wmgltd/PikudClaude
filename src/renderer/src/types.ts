@@ -52,6 +52,8 @@ export interface Settings {
     defaultCwd: string
     defaultColor: string
     autoBookmarkOnAwaiting: boolean
+    autoBookmarkOnPrompt: boolean
+    trackPrompts: boolean
     recentProjectsMax: number
     preferredIDE: 'cursor' | 'vscode' | 'finder'
     initialCommandsLibrary: string[]

@@ -23,6 +23,8 @@ export interface Settings {
     defaultCwd: string
     defaultColor: string
     autoBookmarkOnAwaiting: boolean
+    autoBookmarkOnPrompt: boolean
+    trackPrompts: boolean
     recentProjectsMax: number
     preferredIDE: 'cursor' | 'vscode' | 'finder'
     initialCommandsLibrary: string[]
@@ -67,6 +69,8 @@ const DEFAULTS: Settings = {
     defaultCwd: '',
     defaultColor: '#7c3aed',
     autoBookmarkOnAwaiting: false,
+    autoBookmarkOnPrompt: false,
+    trackPrompts: true,
     recentProjectsMax: 6,
     preferredIDE: 'cursor',
     initialCommandsLibrary: ['claude', 'claude --resume', 'claude --continue'],

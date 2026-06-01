@@ -4,13 +4,21 @@ import { basename } from '../utils/path'
 
 const SESSION_COLORS = ['#7c3aed', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#ef4444', '#8b5cf6', '#14b8a6']
 
+const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
+
+function isRtl(text: string): boolean {
+  return RTL_RE.test(text)
+}
+
 interface Props {
   sessions: SessionMeta[]
   activeId: string | null
   statuses: Record<string, SessionStatus>
+  promptHistory: Record<string, Array<{ text: string; ts: number }>>
   unseen: Set<string>
   needsAttention: Set<string>
   bookmarksOpen: boolean
+  view: 'terminal' | 'dashboard'
   onSelect: (id: string) => void
   onNew: () => void
   onImport: () => void
@@ -18,6 +26,7 @@ interface Props {
   onTogglePalette: () => void
   onToggleBookmarks: () => void
   onSettings: () => void
+  onSetView: (v: 'terminal' | 'dashboard') => void
   onDelete: (id: string) => void
   onRename: (id: string, name: string) => void
   onSetColor: (id: string, color: string) => void
@@ -28,20 +37,27 @@ export function Sidebar({
   sessions,
   activeId,
   statuses,
+  promptHistory,
   unseen,
   needsAttention,
   bookmarksOpen,
+  view,
   onSelect,
   onNew,
   onHelp,
   onTogglePalette,
   onToggleBookmarks,
   onSettings,
+  onSetView,
   onDelete,
   onRename,
   onSetColor,
   onReorder
 }: Props): JSX.Element {
+  const awaitingCount = sessions.reduce(
+    (n, s) => (statuses[s.id] === 'awaiting' ? n + 1 : n),
+    0
+  )
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [colorPickerId, setColorPickerId] = useState<string | null>(null)
@@ -53,6 +69,10 @@ export function Sidebar({
     costUSD: number
     msUntilReset: number
     percentUsed: number | null
+    costPerHour: number | null
+    tokensPerMinute: number | null
+    projectedCost: number | null
+    projectedTokens: number | null
   } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -67,10 +87,17 @@ export function Sidebar({
         .catch(() => undefined)
     }
     fetchUsage()
-    const interval = setInterval(fetchUsage, 10 * 60 * 1000)
+    // Cheap-ish call (parses cached ccusage data); poll faster than the
+    // original 10min so a refreshed Claude session shows up quickly. Also
+    // refresh whenever the window regains focus — the user explicitly came
+    // back, they want fresh numbers, not a cached snapshot.
+    const interval = setInterval(fetchUsage, 2 * 60 * 1000)
+    const onFocus = (): void => fetchUsage()
+    window.addEventListener('focus', onFocus)
     return () => {
       mounted = false
       clearInterval(interval)
+      window.removeEventListener('focus', onFocus)
     }
   }, [])
 
@@ -153,6 +180,32 @@ export function Sidebar({
           <button className="add-btn" onClick={onSettings} title="Settings (⌘,)">⚙</button>
           <button className="add-btn" onClick={onNew} title="New session (also: import existing)">+</button>
         </div>
+      </div>
+      <div className="sidebar-view-switch" role="tablist" aria-label="View">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'terminal'}
+          className={`sidebar-view-tab ${view === 'terminal' ? 'active' : ''}`}
+          onClick={() => onSetView('terminal')}
+        >
+          Terminal
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'dashboard'}
+          className={`sidebar-view-tab ${view === 'dashboard' ? 'active' : ''}`}
+          onClick={() => onSetView('dashboard')}
+          title="Dashboard (⌘D)"
+        >
+          Dashboard
+          {awaitingCount > 0 && (
+            <span className="sidebar-view-badge" title={`${awaitingCount} awaiting`}>
+              {awaitingCount}
+            </span>
+          )}
+        </button>
       </div>
       <div className="sidebar-list">
         {sessions.length === 0 && (
@@ -247,6 +300,15 @@ export function Sidebar({
                   )}
                 </div>
                 <div className="session-cwd">{basename(s.cwd) || s.tmuxName}</div>
+                {promptHistory[s.id]?.[0]?.text && (
+                  <div
+                    className="session-prompt"
+                    dir={isRtl(promptHistory[s.id][0].text) ? 'rtl' : 'ltr'}
+                    title={promptHistory[s.id][0].text}
+                  >
+                    {promptHistory[s.id][0].text}
+                  </div>
+                )}
               </div>
               <div className={`status-icon ${status}`} title={statusLabel(status)} />
               {(isUnseen || needsAttn) && (
@@ -287,20 +349,42 @@ export function Sidebar({
       >
         {usage ? (
           <>
-            <div className="usage-row">
-              <span className="usage-pct">
-                {usage.percentUsed != null ? `${Math.round(usage.percentUsed)}%` : '—'}
-              </span>
+            <div className="usage-row usage-headline">
+              <span className="usage-cost">{formatUSD(usage.costUSD)}</span>
               <span className="usage-reset">↻ {formatDuration(usage.msUntilReset)}</span>
             </div>
-            <div className="usage-bar">
-              <div
-                className="usage-bar-fill"
-                style={{ width: `${Math.min(100, usage.percentUsed ?? 0)}%` }}
-              />
-            </div>
-            <div className="usage-row usage-sub">
-              <span className="usage-tokens">{formatTokens(usage.totalTokens)} tok</span>
+            {usage.percentUsed != null && (
+              <div className="usage-bar">
+                <div
+                  className="usage-bar-fill"
+                  style={{ width: `${Math.min(100, usage.percentUsed)}%` }}
+                />
+                <span className="usage-pct-overlay">{Math.round(usage.percentUsed)}%</span>
+              </div>
+            )}
+            <div className="usage-grid">
+              <div className="usage-stat">
+                <span className="usage-stat-label">tokens</span>
+                <span className="usage-stat-value">{formatTokens(usage.totalTokens)}</span>
+              </div>
+              {usage.costPerHour != null && (
+                <div className="usage-stat">
+                  <span className="usage-stat-label">burn</span>
+                  <span className="usage-stat-value">{formatUSD(usage.costPerHour)}/h</span>
+                </div>
+              )}
+              {usage.tokensPerMinute != null && (
+                <div className="usage-stat">
+                  <span className="usage-stat-label">tok/min</span>
+                  <span className="usage-stat-value">{formatTokens(usage.tokensPerMinute)}</span>
+                </div>
+              )}
+              {usage.projectedCost != null && usage.projectedCost > usage.costUSD && (
+                <div className="usage-stat">
+                  <span className="usage-stat-label">proj</span>
+                  <span className="usage-stat-value">{formatUSD(usage.projectedCost)}</span>
+                </div>
+              )}
             </div>
           </>
         ) : (
@@ -314,7 +398,13 @@ export function Sidebar({
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
+  return String(Math.round(n))
+}
+
+function formatUSD(n: number): string {
+  if (n >= 1000) return `$${Math.round(n).toLocaleString('en')}`
+  if (n >= 10) return `$${n.toFixed(0)}`
+  return `$${n.toFixed(2)}`
 }
 
 function formatDuration(ms: number): string {

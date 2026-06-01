@@ -16,6 +16,8 @@ interface Props {
   cursorBlink?: boolean
   theme?: ThemeColors
   preferredIDE?: 'cursor' | 'vscode' | 'finder'
+  onOpenScrollback?: () => void
+  onPromptSubmit?: (prompt: string) => void
 }
 
 const DEFAULT_FONT_FAMILY =
@@ -37,8 +39,16 @@ export function TerminalView({
   cursorStyle = 'block',
   cursorBlink = true,
   theme = DEFAULT_THEME,
-  preferredIDE = 'cursor'
+  preferredIDE = 'cursor',
+  onOpenScrollback,
+  onPromptSubmit
 }: Props): JSX.Element {
+  const onOpenScrollbackRef = useRef(onOpenScrollback)
+  const onPromptSubmitRef = useRef(onPromptSubmit)
+  useEffect(() => {
+    onOpenScrollbackRef.current = onOpenScrollback
+    onPromptSubmitRef.current = onPromptSubmit
+  }, [onOpenScrollback, onPromptSubmit])
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -52,6 +62,7 @@ export function TerminalView({
   const scrollDepthRef = useRef(0)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchMatch, setSearchMatch] = useState<{ index: number; count: number } | null>(null)
 
   useEffect(() => {
     preferredIDERef.current = preferredIDE
@@ -84,6 +95,9 @@ export function TerminalView({
     term.loadAddon(new WebLinksAddon())
     term.loadAddon(new ClipboardAddon())
     term.loadAddon(search)
+    search.onDidChangeResults(({ resultIndex, resultCount }) => {
+      setSearchMatch(resultCount > 0 ? { index: resultIndex + 1, count: resultCount } : null)
+    })
     term.open(host)
 
     term.attachCustomKeyEventHandler((ev) => {
@@ -95,10 +109,26 @@ export function TerminalView({
         return false
       }
 
-      // ⌘C or ⌘⇧C — copy current selection. We don't intercept plain Ctrl+C:
+      // ⌘⇧C — open the scrollback overlay. xterm's custom-key handler
+      // wraps `return false` with `cancel(event)` which stops propagation,
+      // so the window-level App.tsx handler never sees it. Trigger it from
+      // here directly instead.
+      if (
+        ev.metaKey &&
+        ev.shiftKey &&
+        !ev.ctrlKey &&
+        !ev.altKey &&
+        ev.key.toLowerCase() === 'c'
+      ) {
+        onOpenScrollbackRef.current?.()
+        return false
+      }
+
+      // ⌘C — copy current selection. We don't intercept plain Ctrl+C:
       // that has to stay reserved for SIGINT, otherwise users can't interrupt
       // a running Claude when they happen to have something selected.
-      const isCmdC = ev.metaKey && !ev.ctrlKey && !ev.altKey && ev.key.toLowerCase() === 'c'
+      const isCmdC =
+        ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'c'
       if (isCmdC) {
         const sel = term.getSelection()
         if (sel) navigator.clipboard.writeText(sel).catch(() => undefined)
@@ -113,8 +143,62 @@ export function TerminalView({
     // clipboard. This matches macOS Terminal / Cursor / VSCode behavior and
     // avoids surprise clipboard overwrites.
 
+    // Track left-button state so the wheel handler can suppress scroll
+    // during an active drag — otherwise tmux scrolls fresh content under
+    // xterm's visual selection (which is anchored to buffer rows), and the
+    // selection appears to slide with the viewport.
+    let dragInProgress = false
+    host.addEventListener('mousedown', (e) => {
+      if (e.button === 0) {
+        dragInProgress = true
+        host.classList.add('dragging')
+      }
+    })
+    const endDragTrack = (e: MouseEvent): void => {
+      if (e.button === 0) {
+        dragInProgress = false
+        host.classList.remove('dragging')
+      }
+    }
+    host.addEventListener('mouseup', endDragTrack)
+    host.addEventListener('mouseleave', endDragTrack)
+
+    // Drag-and-drop of image files from Finder: the browser default is to
+    // type the file path as text. Override so dropped images are attached
+    // to Claude Code via the clipboard-paste flow (write each image to the
+    // system clipboard, then send a bracketed-paste sequence so Claude
+    // notices and reads the clipboard image as `[Image #N]`).
+    host.addEventListener('dragover', (e) => {
+      const items = e.dataTransfer?.items
+      if (items && Array.from(items).some((it) => it.kind === 'file')) {
+        e.preventDefault()
+      }
+    })
+    host.addEventListener('drop', async (e) => {
+      const files = Array.from(e.dataTransfer?.files ?? [])
+      if (files.length === 0) return
+      e.preventDefault()
+      e.stopPropagation()
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        if (!file.type.startsWith('image/')) continue
+        const path = window.api.getPathForFile(file)
+        if (!path) continue
+        try {
+          await window.api.attachImage(path)
+          window.api.writeSession(session.id, '\x1b[200~\x1b[201~')
+          if (i < files.length - 1) {
+            await new Promise((r) => setTimeout(r, 300))
+          }
+        } catch {
+          /* skip non-image / unreadable */
+        }
+      }
+    })
+
     let wheelAccum = 0
     term.attachCustomWheelEventHandler((ev) => {
+      if (dragInProgress) return false
       if (ev.deltaY === 0) return false
       wheelAccum += ev.deltaY
       const threshold = 30
@@ -139,6 +223,8 @@ export function TerminalView({
       return false
     })
 
+const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+))?/g
+
     term.registerLinkProvider({
       provideLinks: (lineNumber, callback) => {
         const buffer = term.buffer.active
@@ -153,9 +239,9 @@ export function TerminalView({
           text: string
           activate: () => void
         }> = []
-        const re = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+))?/g
+        LINK_RE.lastIndex = 0
         let m: RegExpExecArray | null
-        while ((m = re.exec(text)) !== null) {
+        while ((m = LINK_RE.exec(text)) !== null) {
           const [match, path, lineStr, colStr] = m
           const startCol = m.index + 1
           const endCol = m.index + match.length
@@ -179,6 +265,53 @@ export function TerminalView({
       }
     })
 
+    // With xterm in native mouse mode, click events are forwarded to tmux
+    // instead of triggering xterm's link-provider activate callback. Restore
+    // the click-to-open by running the same path-matching logic ourselves on
+    // a captured click event; tmux still receives the mouse press/release as
+    // a no-op (MouseDown1Pane = select-pane, MouseUp1Pane unbound).
+    host.addEventListener(
+      'click',
+      (e) => {
+        if (e.button !== 0) return
+        const term = termRef.current
+        if (!term) return
+        const screen =
+          (host.querySelector('.xterm-screen') as HTMLElement | null) ?? host
+        const rect = screen.getBoundingClientRect()
+        const cellW = rect.width / term.cols
+        const cellH = rect.height / term.rows
+        if (!cellW || !cellH) return
+        const col = Math.floor((e.clientX - rect.left) / cellW) + 1
+        const visualRow = Math.floor((e.clientY - rect.top) / cellH)
+        if (visualRow < 0 || visualRow >= term.rows) return
+        const buf = term.buffer.active
+        const line = buf.getLine(buf.viewportY + visualRow)
+        if (!line) return
+        const text = line.translateToString(true)
+        LINK_RE.lastIndex = 0
+        let m: RegExpExecArray | null
+        while ((m = LINK_RE.exec(text)) !== null) {
+          const startCol = m.index + 1
+          const endCol = m.index + m[0].length
+          if (col >= startCol && col <= endCol) {
+            const [, path, lineStr, colStr] = m
+            window.api
+              .openFile({
+                path,
+                line: Number(lineStr) || undefined,
+                col: colStr ? Number(colStr) : undefined,
+                cwd: session.cwd,
+                ide: preferredIDERef.current
+              })
+              .catch(() => undefined)
+            return
+          }
+        }
+      },
+      { capture: true }
+    )
+
     termRef.current = term
     fitRef.current = fit
     searchRef.current = search
@@ -198,9 +331,92 @@ export function TerminalView({
       await window.api.attachSession(session.id, dims.cols, dims.rows)
       if (cancelled) return
       unsubRef.current = window.api.onSessionData((id, data) => {
+        // Strip mouse-tracking DECSETs (1000/1002/1006 etc.) so xterm stays
+        // out of mouse mode. That way drag = xterm-native text selection
+        // (purple, sticky, ⌘C copies) — like macOS Terminal / iTerm. For
+        // selecting content that scrolled off-screen, use the ⌘⇧C overlay.
+        // The wheel handler below still passes wheel events to tmux as X10
+        // codes manually so scrolling still enters tmux's copy-mode.
         if (id === session.id) term.write(stripMouseTracking(data))
       })
+      // Mirror what the user is currently typing into the input line. We
+      // tap term.onData (the same channel that writes to the pty) so the
+      // buffer is independent of how Claude's TUI renders — works in any
+      // shell or app. Submitted prompts (plain CR) bubble up via
+      // onPromptSubmit; Shift+Enter is rewritten as `\x1b\r` upstream so it
+      // doesn't trigger a submit here.
+      let inputBuf = ''
+      let inEsc = false
+      let inCsi = false
+      let inOsc = false
+      // Filter just enough to skip the "I'm setting up my shell" inputs that
+      // happen before Claude even starts: cd / ls / clear / claude / etc.
+      // Anything longer than 30 chars is treated as a real prompt — picking
+      // a tighter cap stops English prompts like "find the bug in X" or
+      // "open the README" from being misclassified as shell commands just
+      // because they start with `find` or `open`.
+      const SHELL_CMD_RE =
+        /^\s*(?:claude|exit|clear|reset|cd|ls|pwd|tmux|history)(?:\s|$)/i
+      const looksLikeShellCmd = (s: string): boolean =>
+        s.length < 30 && SHELL_CMD_RE.test(s)
+      const onTypedChunk = (data: string): void => {
+        for (const ch of data) {
+          const code = ch.charCodeAt(0)
+          if (inEsc) {
+            if (ch === '[') {
+              inEsc = false
+              inCsi = true
+            } else if (ch === ']') {
+              // OSC start (ESC ]) — xterm answers OSC color queries on this
+              // same data channel, so we have to skip the response body or
+              // it gets dumped into the input buffer.
+              inEsc = false
+              inOsc = true
+            } else if (ch === '\r' || ch === '\n') {
+              // Shift+Enter (the TerminalView keyhandler rewrites it as
+              // `\x1b\r`) — treat as a soft line break inside the prompt so
+              // multi-line prompts render as "line1 line2" not "line1line2".
+              inEsc = false
+              if (inputBuf && !inputBuf.endsWith(' ')) inputBuf += ' '
+            } else {
+              inEsc = false
+            }
+            continue
+          }
+          if (inCsi) {
+            if (code >= 0x40 && code <= 0x7e) inCsi = false
+            continue
+          }
+          if (inOsc) {
+            // OSC ends on BEL (\x07) or ST (\x1b \\). Treat any ESC as the
+            // start of ST and exit OSC; the trailing `\` will be eaten by the
+            // post-ESC branch on the next iteration.
+            if (code === 0x07) inOsc = false
+            else if (code === 0x1b) {
+              inOsc = false
+              inEsc = true
+            }
+            continue
+          }
+          if (code === 0x1b) {
+            inEsc = true
+            continue
+          }
+          if (code === 0x7f || code === 0x08) {
+            inputBuf = inputBuf.slice(0, -1)
+            continue
+          }
+          if (ch === '\r' || ch === '\n') {
+            const prompt = inputBuf.trim()
+            inputBuf = ''
+            if (prompt && !looksLikeShellCmd(prompt)) onPromptSubmitRef.current?.(prompt)
+            continue
+          }
+          if (code >= 32) inputBuf += ch
+        }
+      }
       term.onData((data) => {
+        onTypedChunk(data)
         if (inCopyModeRef.current) {
           inCopyModeRef.current = false
           scrollDepthRef.current = 0
@@ -239,6 +455,32 @@ export function TerminalView({
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
+  }, [active])
+
+  useEffect(() => {
+    if (!active) return
+    const handler = (e: Event): void => {
+      const detail = (e as CustomEvent<string>).detail
+      if (!detail) return
+      setSearchOpen(true)
+      setSearchQuery(detail)
+      requestAnimationFrame(() => {
+        searchInputRef.current?.focus()
+        searchInputRef.current?.select()
+        searchRef.current?.findPrevious(detail, {
+          decorations: {
+            matchBackground: '#7c3aed55',
+            matchBorder: '#7c3aed',
+            matchOverviewRuler: '#7c3aed',
+            activeMatchBackground: '#7c3aedaa',
+            activeMatchBorder: '#a78bfa',
+            activeMatchColorOverviewRuler: '#a78bfa'
+          }
+        })
+      })
+    }
+    window.addEventListener('pk:search', handler as EventListener)
+    return () => window.removeEventListener('pk:search', handler as EventListener)
   }, [active])
 
   useEffect(() => {
@@ -348,6 +590,7 @@ export function TerminalView({
   const closeSearch = (): void => {
     setSearchOpen(false)
     setSearchQuery('')
+    setSearchMatch(null)
     searchRef.current?.clearDecorations()
     requestAnimationFrame(() => termRef.current?.focus())
   }
@@ -399,6 +642,14 @@ export function TerminalView({
               }
             }}
           />
+          {searchMatch && (
+            <span className="terminal-search-count">
+              {searchMatch.index}/{searchMatch.count}
+            </span>
+          )}
+          {!searchMatch && searchQuery && (
+            <span className="terminal-search-count empty">0/0</span>
+          )}
           <button
             type="button"
             className="terminal-search-btn"

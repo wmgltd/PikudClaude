@@ -378,6 +378,25 @@ export function SettingsDialog({ initial, onSave, onCancel, onTestSound, onShowO
               <Hint text="Automatically save a bookmark each time Claude pauses to ask you something — handy for jumping back to recent decision points." />
             </label>
             <label className="settings-row">
+              <input
+                type="checkbox"
+                checked={draft.sessions.trackPrompts}
+                onChange={(e) => update('sessions', { trackPrompts: e.target.checked })}
+              />
+              <span>Track prompts</span>
+              <Hint text="Capture the last prompt you typed in each session and show it as a pill in the top bar + subtitle in the sidebar. Disable for privacy if you'd rather not have prompts saved to disk." />
+            </label>
+            <label className="settings-row">
+              <input
+                type="checkbox"
+                checked={draft.sessions.autoBookmarkOnPrompt}
+                onChange={(e) => update('sessions', { autoBookmarkOnPrompt: e.target.checked })}
+                disabled={!draft.sessions.trackPrompts}
+              />
+              <span>Auto-bookmark on each prompt</span>
+              <Hint text="Save a bookmark labelled with the prompt every time you submit one. Useful for getting back to a specific decision point — but quickly fills the bookmarks panel." />
+            </label>
+            <label className="settings-row">
               <span className="settings-label">
                 Recent projects max
                 <Hint text="How many recently-used project paths to remember and display in the New Session dialog." />
@@ -609,6 +628,22 @@ export function SettingsDialog({ initial, onSave, onCancel, onTestSound, onShowO
               <div>Change session color</div>
               <div className="shortcut-keys">Drag a row</div>
               <div>Reorder sessions</div>
+
+              <div className="shortcuts-group">Prompt pill</div>
+              <div></div>
+              <div className="shortcut-keys">Click pill</div>
+              <div>Find that prompt in the terminal scrollback</div>
+              <div className="shortcut-keys">Double-click pill</div>
+              <div>Copy prompt text to clipboard</div>
+              <div className="shortcut-keys">Hover pill</div>
+              <div>Full prompt + action hints</div>
+
+              <div className="shortcuts-group">Terminal mouse</div>
+              <div></div>
+              <div className="shortcut-keys">Click + drag</div>
+              <div>Select text — auto-scrolls at edges, copies on release</div>
+              <div className="shortcut-keys">Click <code>file.ts:42</code></div>
+              <div>Open file in your preferred IDE</div>
             </div>
           </section>
           )}

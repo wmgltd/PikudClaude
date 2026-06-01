@@ -11,6 +11,7 @@ export interface PaletteAction {
 interface Props {
   sessions: SessionMeta[]
   activeId: string | null
+  promptHistory: Record<string, Array<{ text: string; ts: number }>>
   onClose: () => void
   onSelectSession: (id: string) => void
   actions: PaletteAction[]
@@ -28,6 +29,7 @@ interface Item {
 export function CommandPalette({
   sessions,
   activeId,
+  promptHistory,
   onClose,
   onSelectSession,
   actions,
@@ -58,11 +60,21 @@ export function CommandPalette({
           badge: 'action',
           run: a.run
         }))
-    const all = [...sessionItems, ...actionItems]
+    const promptItems: Item[] =
+      mode === 'sessions' || !activeId
+        ? []
+        : (promptHistory[activeId] ?? []).map((entry, i) => ({
+            key: `p:${i}`,
+            label: entry.text,
+            badge: 'prompt',
+            run: () =>
+              window.dispatchEvent(new CustomEvent('pk:search', { detail: entry.text }))
+          }))
+    const all = [...sessionItems, ...actionItems, ...promptItems]
     if (!query.trim()) return all
     const q = query.toLowerCase()
     return all.filter((item) => fuzzyMatch(item.label.toLowerCase(), q))
-  }, [sessions, activeId, actions, query, onSelectSession, mode])
+  }, [sessions, activeId, actions, query, onSelectSession, mode, promptHistory])
 
   useEffect(() => {
     setCursor(0)

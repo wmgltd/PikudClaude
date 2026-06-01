@@ -130,6 +130,15 @@ const api = {
   captureLive: (id: string): Promise<string> => ipcRenderer.invoke('tmux:capture-live', id),
   captureScrollback: (id: string): Promise<string> =>
     ipcRenderer.invoke('tmux:capture-scrollback', id),
+  loadPromptHistory: (): Promise<Record<string, Array<{ text: string; ts: number }>>> =>
+    ipcRenderer.invoke('prompts:load'),
+  savePromptHistory: (
+    history: Record<string, Array<{ text: string; ts: number }>>
+  ): Promise<void> => ipcRenderer.invoke('prompts:save', history),
+  loadPromptStats: (): Promise<Record<string, number[]>> =>
+    ipcRenderer.invoke('promptStats:load'),
+  savePromptStats: (stats: Record<string, number[]>): Promise<void> =>
+    ipcRenderer.invoke('promptStats:save', stats),
   onSessionStatus: (handler: (id: string, status: SessionStatus) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, id: string, status: SessionStatus) =>
       handler(id, status)
@@ -196,6 +205,8 @@ const api = {
   },
 
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+  attachImage: (path: string): Promise<void> =>
+    ipcRenderer.invoke('drag:attach-image', path),
 
   logRendererError: (entry: { kind: string; message: string; stack?: string; context?: Record<string, unknown> }): Promise<void> =>
     ipcRenderer.invoke('errors:log-renderer', entry),

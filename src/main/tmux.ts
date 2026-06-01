@@ -146,13 +146,30 @@ export class TmuxManager extends EventEmitter {
     } catch {
       /* ignore */
     }
-    try {
-      await tmux(
-        'bind-key', '-T', 'copy-mode-vi', 'MouseDragEnd1Pane',
-        'send-keys -X copy-selection-no-clear ; run-shell -b "tmux show-buffer | pbcopy"'
-      )
-    } catch {
-      /* ignore */
+    // Bind in BOTH copy-mode tables. tmux defaults to emacs (`copy-mode`)
+    // unless `mode-keys vi` is set globally; binding only copy-mode-vi would
+    // let the default `copy-selection-and-cancel` fire on release, which
+    // exits copy-mode AND clears the selection. We use the two-step form so
+    // the visible selection survives (copy-pipe-no-clear actually clears the
+    // visual in tmux 3.6 despite the name): copy-selection-no-clear keeps the
+    // visual highlight, and save-buffer | pbcopy bridges the most-recent
+    // tmux buffer to the system clipboard sequentially (no `-b`, so it
+    // completes before tmux moves on and never races the buffer write).
+    for (const table of ['copy-mode', 'copy-mode-vi']) {
+      try {
+        // Native terminal behaviour: copy to clipboard, exit copy-mode, clear
+        // the visual selection. Matches macOS Terminal / iTerm — release the
+        // mouse and you're back in the live screen, ready to type. We can't
+        // keep the selection visible across release without abandoning
+        // tmux's `-M` mouse drag entirely (its state machine wipes the
+        // visual on mouseup), so we don't try.
+        await tmux(
+          'bind-key', '-T', table, 'MouseDragEnd1Pane',
+          'send-keys -X copy-pipe-and-cancel "pbcopy"'
+        )
+      } catch {
+        /* ignore */
+      }
     }
   }
 

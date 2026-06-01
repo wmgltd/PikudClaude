@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, Notification, Menu } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, Notification, Menu, clipboard } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -9,6 +9,12 @@ import { scanProjects } from './projects'
 import { SettingsStore, type Settings } from './settings'
 import { getActiveBlock } from './usage'
 import { initErrorLogging, appendErrorEntry, revealErrorLog } from './errorLog'
+import {
+  loadPromptHistory,
+  savePromptHistory,
+  loadPromptStats,
+  savePromptStats
+} from './store'
 import type { CreateSessionOpts, ImportSessionOpts } from './types'
 
 const isDev = !app.isPackaged
@@ -146,6 +152,29 @@ function wireIpc(): void {
   ipcMain.handle('tmux:capture-scrollback', (_e, id: string) =>
     manager.captureSnapshot(id, 10000)
   )
+
+  // Drag-dropped image files: write the file's bytes to the system
+  // clipboard as image data so Claude Code's paste-image flow can pick it
+  // up. The renderer follows up by sending a bracketed paste sequence to
+  // nudge Claude into checking the clipboard.
+  ipcMain.handle('drag:attach-image', async (_e, filePath: string) => {
+    const img = nativeImage.createFromPath(filePath)
+    if (img.isEmpty()) throw new Error('not a valid image file')
+    clipboard.writeImage(img)
+  })
+
+  ipcMain.handle('prompts:load', () => loadPromptHistory())
+  ipcMain.handle(
+    'prompts:save',
+    (_e, history: Record<string, Array<{ text: string; ts: number }>>) => {
+      savePromptHistory(history)
+    }
+  )
+  ipcMain.handle('promptStats:load', () => loadPromptStats())
+  ipcMain.handle('promptStats:save', (_e, stats: Record<string, number[]>) => {
+    savePromptStats(stats)
+  })
+
 
   ipcMain.handle('dialog:pick-directory', async () => {
     const result = await dialog.showOpenDialog({
@@ -377,6 +406,11 @@ function buildAppMenu(): void {
           label: 'Find in Terminal…',
           accelerator: 'CmdOrCtrl+F',
           click: () => send('search')
+        },
+        {
+          label: 'View Scrollback (selectable text)',
+          accelerator: 'Shift+CmdOrCtrl+C',
+          click: () => send('view-scrollback')
         },
         { type: 'separator' },
         { label: 'Toggle Bookmarks Panel', click: () => send('toggle-bookmarks') },

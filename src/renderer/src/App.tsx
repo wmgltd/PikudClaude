@@ -11,6 +11,7 @@ import { SettingsDialog } from './components/SettingsDialog'
 import { UpdateAvailableDialog } from './components/UpdateAvailableDialog'
 import { WelcomeDialog } from './components/WelcomeDialog'
 import { ScrollbackOverlay } from './components/ScrollbackOverlay'
+import { Dashboard } from './components/Dashboard'
 import type { SessionMeta, SessionStatus, Settings } from './types'
 import { resolveTheme } from './types'
 
@@ -30,6 +31,8 @@ const DEFAULT_SETTINGS: Settings = {
     defaultCwd: '',
     defaultColor: '#7c3aed',
     autoBookmarkOnAwaiting: false,
+    autoBookmarkOnPrompt: false,
+    trackPrompts: true,
     recentProjectsMax: 6,
     preferredIDE: 'cursor'
   },
@@ -143,6 +146,13 @@ export function App(): JSX.Element {
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
   const [showBookmarks, setShowBookmarks] = useState(false)
   const [showScrollback, setShowScrollback] = useState(false)
+  const [view, setView] = useState<'terminal' | 'dashboard'>('terminal')
+  const [promptHistory, setPromptHistory] = useState<
+    Record<string, Array<{ text: string; ts: number }>>
+  >({})
+  const [promptStats, setPromptStats] = useState<Record<string, number[]>>({})
+  const promptHistoryLoadedRef = useRef(false)
+  const promptStatsLoadedRef = useRef(false)
   const [bookmarksRefresh, setBookmarksRefresh] = useState(0)
   const [statuses, setStatuses] = useState<Record<string, SessionStatus>>({})
   const [unseen, setUnseen] = useState<Set<string>>(new Set())
@@ -271,7 +281,58 @@ export function App(): JSX.Element {
         settingsRef.current = s
       })
       .catch(() => undefined)
+    window.api
+      .loadPromptHistory()
+      .then((p) => {
+        setPromptHistory(p || {})
+        promptHistoryLoadedRef.current = true
+      })
+      .catch(() => {
+        promptHistoryLoadedRef.current = true
+      })
+    window.api
+      .loadPromptStats()
+      .then((s) => {
+        setPromptStats(s || {})
+        promptStatsLoadedRef.current = true
+      })
+      .catch(() => {
+        promptStatsLoadedRef.current = true
+      })
   }, [])
+
+  useEffect(() => {
+    if (!promptHistoryLoadedRef.current) return
+    const t = setTimeout(() => {
+      window.api.savePromptHistory(promptHistory).catch(() => undefined)
+    }, 400)
+    return () => clearTimeout(t)
+  }, [promptHistory])
+
+  useEffect(() => {
+    if (!promptStatsLoadedRef.current) return
+    const t = setTimeout(() => {
+      window.api.savePromptStats(promptStats).catch(() => undefined)
+    }, 400)
+    return () => clearTimeout(t)
+  }, [promptStats])
+
+  // Prune prompts for sessions that no longer exist (deleted while the app
+  // was closed, etc).
+  useEffect(() => {
+    if (!promptHistoryLoadedRef.current) return
+    if (sessions.length === 0) return
+    const ids = new Set(sessions.map((s) => s.id))
+    setPromptHistory((prev) => {
+      let changed = false
+      const next: Record<string, string> = {}
+      for (const [id, p] of Object.entries(prev)) {
+        if (ids.has(id)) next[id] = p
+        else changed = true
+      }
+      return changed ? next : prev
+    })
+  }, [sessions])
 
   useEffect(() => {
     settingsRef.current = settings
@@ -318,6 +379,11 @@ export function App(): JSX.Element {
           })
           break
         }
+        case 'view-scrollback': {
+          if (!activeIdRef.current) break
+          setShowScrollback(true)
+          break
+        }
         case 'search': {
           /* dispatch to active TerminalView via synthetic keydown */
           const ev = new KeyboardEvent('keydown', {
@@ -354,6 +420,18 @@ export function App(): JSX.Element {
         if (!prev.has(id)) return prev
         const next = new Set(prev)
         next.delete(id)
+        return next
+      })
+      setPromptHistory((prev) => {
+        if (!(id in prev)) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+      setPromptStats((prev) => {
+        if (!(id in prev)) return prev
+        const next = { ...prev }
+        delete next[id]
         return next
       })
     })
@@ -501,6 +579,11 @@ export function App(): JSX.Element {
         })
         return
       }
+      if (!e.shiftKey && (e.code === 'KeyD' || e.key.toLowerCase() === 'd')) {
+        e.preventDefault()
+        setView((v) => (v === 'terminal' ? 'dashboard' : 'terminal'))
+        return
+      }
       if (!e.shiftKey) {
         const n = Number(e.key)
         if (Number.isInteger(n) && n >= 1 && n <= 9) {
@@ -574,6 +657,18 @@ export function App(): JSX.Element {
     await window.api.killSession(id)
     setSessions((prev) => prev.filter((s) => s.id !== id))
     setActiveId((prev) => (prev === id ? null : prev))
+    setPromptHistory((prev) => {
+      if (!(id in prev)) return prev
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setPromptStats((prev) => {
+      if (!(id in prev)) return prev
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
   }
 
   const handleRename = async (id: string, name: string) => {
@@ -628,14 +723,35 @@ export function App(): JSX.Element {
 
   return (
     <div className="app-shell">
-      <TopBar session={activeSession} />
+      <TopBar
+        session={activeSession}
+        lastPrompt={activeId ? promptHistory[activeId]?.[0]?.text ?? null : null}
+        lastPromptTs={activeId ? promptHistory[activeId]?.[0]?.ts ?? null : null}
+        status={activeId ? statuses[activeId] : undefined}
+        view={view}
+        onToggleView={() => setView((v) => (v === 'terminal' ? 'dashboard' : 'terminal'))}
+        onClearPromptHistory={
+          activeId
+            ? () =>
+                setPromptHistory((prev) => {
+                  if (!(activeId in prev)) return prev
+                  const next = { ...prev }
+                  delete next[activeId]
+                  return next
+                })
+            : undefined
+        }
+      />
       <div className="app" style={{ gridTemplateColumns: gridCols }}>
       <Sidebar
         sessions={sessions}
         activeId={activeId}
         statuses={statuses}
+        promptHistory={promptHistory}
         unseen={unseen}
         needsAttention={needsAttention}
+        view={view}
+        onSetView={setView}
         onSelect={setActiveId}
         onNew={() => setShowNewDialog(true)}
         onImport={() => setShowImportDialog(true)}
@@ -657,10 +773,22 @@ export function App(): JSX.Element {
       />
       <div className="resizer" onMouseDown={startDrag} />
       <div
-        className="terminal-area"
+        className={`terminal-area view-${view}`}
         style={{ background: resolveTheme(settings.appearance).background }}
       >
-        {sessions.length === 0 && (
+        {view === 'dashboard' && (
+          <Dashboard
+            sessions={sessions}
+            statuses={statuses}
+            promptHistory={promptHistory}
+            promptStats={promptStats}
+            onFocus={(id) => {
+              setActiveId(id)
+              setView('terminal')
+            }}
+          />
+        )}
+        {sessions.length === 0 && view === 'terminal' && (
           <div className="terminal-empty">
             no sessions yet — hit <kbd>+</kbd> in the sidebar to start one
           </div>
@@ -683,6 +811,28 @@ export function App(): JSX.Element {
               cursorBlink={settings.appearance.cursorBlink}
               theme={resolveTheme(settings.appearance)}
               preferredIDE={settings.sessions.preferredIDE}
+              onOpenScrollback={() => setShowScrollback(true)}
+              onPromptSubmit={(prompt) => {
+                if (!settingsRef.current.sessions.trackPrompts) return
+                const now = Date.now()
+                setPromptHistory((prev) => {
+                  const cur = prev[s.id] ?? []
+                  if (cur[0]?.text === prompt) return prev
+                  const filtered = cur.filter((e) => e.text !== prompt)
+                  const next = [{ text: prompt, ts: now }, ...filtered].slice(0, 20)
+                  return { ...prev, [s.id]: next }
+                })
+                setPromptStats((prev) => {
+                  const cur = prev[s.id] ?? []
+                  return { ...prev, [s.id]: [...cur, now] }
+                })
+                if (settingsRef.current.sessions.autoBookmarkOnPrompt) {
+                  const label = prompt.length > 60 ? prompt.slice(0, 57) + '…' : prompt
+                  window.api.createBookmark(s.id, label).then(() => {
+                    setBookmarksRefresh((n) => n + 1)
+                  }).catch(() => undefined)
+                }
+              }}
             />
           ))}
       </div>
@@ -746,6 +896,7 @@ export function App(): JSX.Element {
         <CommandPalette
           sessions={sessions}
           activeId={activeId}
+          promptHistory={promptHistory}
           actions={paletteActions}
           onClose={() => setShowPalette(false)}
           onSelectSession={setActiveId}
