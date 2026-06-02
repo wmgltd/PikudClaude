@@ -239,6 +239,11 @@ input[type="text"]:focus {
 .app {
   display: grid;
   grid-template-columns: 240px 4px 1fr;
+  /* Without an explicit row track, an auto row grows with the tallest
+     grid item — so a sidebar full of sessions pushes the terminal column
+     off-screen. minmax(0, 1fr) caps the row to the parent height and lets
+     each column scroll internally. */
+  grid-template-rows: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
 }
@@ -269,6 +274,11 @@ input[type="text"]:focus {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  /* min-height: 0 + overflow: hidden lets the inner .sidebar-list (flex:1
+     + overflow-y: auto) actually scroll instead of pushing siblings — the
+     header, view switch, and footer stay pinned at full width. */
+  min-height: 0;
+  overflow: hidden;
   -webkit-app-region: drag;
 }
 
