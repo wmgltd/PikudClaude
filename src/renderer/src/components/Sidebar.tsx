@@ -19,6 +19,7 @@ interface Props {
   unseen: Set<string>
   needsAttention: Set<string>
   bookmarksOpen: boolean
+  conversationOpen: boolean
   view: 'terminal' | 'dashboard'
   onSelect: (id: string) => void
   onNew: () => void
@@ -26,6 +27,7 @@ interface Props {
   onHelp: () => void
   onTogglePalette: () => void
   onToggleBookmarks: () => void
+  onToggleConversation: () => void
   onSettings: () => void
   onSetView: (v: 'terminal' | 'dashboard') => void
   onDelete: (id: string) => void
@@ -42,12 +44,14 @@ export function Sidebar({
   unseen,
   needsAttention,
   bookmarksOpen,
+  conversationOpen,
   view,
   onSelect,
   onNew,
   onHelp,
   onTogglePalette,
   onToggleBookmarks,
+  onToggleConversation,
   onSettings,
   onSetView,
   onDelete,
@@ -173,6 +177,11 @@ export function Sidebar({
         <div className="sidebar-title">PikudClaude <span className="sidebar-title-by">by WMG</span></div>
         <div className="sidebar-buttons">
           <button className="add-btn" onClick={onTogglePalette} title="Command palette (⌘K)">⌘K</button>
+          <button
+            className={`add-btn ${conversationOpen ? 'on' : ''}`}
+            onClick={onToggleConversation}
+            title={`Conversation panel (${IS_MAC ? '⌘J' : 'Ctrl+Shift+J'})`}
+          >💬</button>
           <button
             className={`add-btn ${bookmarksOpen ? 'on' : ''}`}
             onClick={onToggleBookmarks}

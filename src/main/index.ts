@@ -15,6 +15,7 @@ import {
   loadPromptStats,
   savePromptStats
 } from './store'
+import { watchConversation } from './conversation'
 import type { CreateSessionOpts, ImportSessionOpts } from './types'
 
 const isDev = !app.isPackaged
@@ -175,6 +176,21 @@ function wireIpc(): void {
     savePromptStats(stats)
   })
 
+  // Conversation panel: tail Claude's jsonl session log and stream incremental
+  // events (initial backlog → append/reset). Only one watcher at a time (the
+  // currently-open panel).
+  let convWatcher: (() => void) | null = null
+  ipcMain.handle('conversation:watch', (_e, cwd: string) => {
+    convWatcher?.()
+    const win = BrowserWindow.getAllWindows()[0]
+    convWatcher = watchConversation(cwd, (evt) => {
+      win?.webContents.send('conversation:event', evt)
+    })
+  })
+  ipcMain.handle('conversation:unwatch', () => {
+    convWatcher?.()
+    convWatcher = null
+  })
 
   ipcMain.handle('dialog:pick-directory', async () => {
     const result = await dialog.showOpenDialog({

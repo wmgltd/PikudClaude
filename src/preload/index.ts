@@ -139,6 +139,31 @@ const api = {
     ipcRenderer.invoke('promptStats:load'),
   savePromptStats: (stats: Record<string, number[]>): Promise<void> =>
     ipcRenderer.invoke('promptStats:save', stats),
+  watchConversation: (cwd: string): Promise<void> =>
+    ipcRenderer.invoke('conversation:watch', cwd),
+  unwatchConversation: (): Promise<void> => ipcRenderer.invoke('conversation:unwatch'),
+  onConversationEvent: (
+    handler: (
+      event:
+        | {
+            type: 'initial' | 'append'
+            messages: Array<{
+              id: string
+              role: 'user' | 'assistant' | 'tool_use' | 'tool_result'
+              text: string
+              ts: number
+              toolName?: string
+            }>
+          }
+        | { type: 'reset' }
+        | { type: 'sync_complete' }
+    ) => void
+  ): (() => void) => {
+    const listener = (_e: IpcRendererEvent, evt: Parameters<typeof handler>[0]): void =>
+      handler(evt)
+    ipcRenderer.on('conversation:event', listener)
+    return () => ipcRenderer.removeListener('conversation:event', listener)
+  },
   onSessionStatus: (handler: (id: string, status: SessionStatus) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, id: string, status: SessionStatus) =>
       handler(id, status)

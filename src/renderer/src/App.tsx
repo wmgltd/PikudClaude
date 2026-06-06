@@ -12,6 +12,7 @@ import { UpdateAvailableDialog } from './components/UpdateAvailableDialog'
 import { WelcomeDialog } from './components/WelcomeDialog'
 import { ScrollbackOverlay } from './components/ScrollbackOverlay'
 import { Dashboard } from './components/Dashboard'
+import { ConversationPanel } from './components/ConversationPanel'
 import { IS_MAC } from './utils/platform'
 import type { SessionMeta, SessionStatus, Settings } from './types'
 import { resolveTheme } from './types'
@@ -146,7 +147,11 @@ export function App(): JSX.Element {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
   const [showBookmarks, setShowBookmarks] = useState(false)
+  const [showConversation, setShowConversation] = useState(false)
   const [showScrollback, setShowScrollback] = useState(false)
+  const [scrollbackInitialSearch, setScrollbackInitialSearch] = useState<string | undefined>(
+    undefined
+  )
   const [view, setView] = useState<'terminal' | 'dashboard'>('terminal')
   const [promptHistory, setPromptHistory] = useState<
     Record<string, Array<{ text: string; ts: number }>>
@@ -341,6 +346,22 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     return window.api.onNotificationClick((id) => setActiveId(id))
+  }, [])
+
+  // Conv-panel bubble click → open ScrollbackOverlay with the snippet
+  // highlighted. We don't try to scroll xterm itself: while Claude is
+  // running it owns the alt-screen, so xterm's normal-buffer scrollback is
+  // empty. The overlay captures tmux's pane buffer, which is the only place
+  // the old content is actually available.
+  useEffect(() => {
+    const handler = (e: Event): void => {
+      const detail = (e as CustomEvent<string>).detail
+      if (!detail) return
+      setScrollbackInitialSearch(detail)
+      setShowScrollback(true)
+    }
+    window.addEventListener('pk:jump-to-text', handler as EventListener)
+    return () => window.removeEventListener('pk:jump-to-text', handler as EventListener)
   }, [])
 
   useEffect(() => {
@@ -570,6 +591,16 @@ export function App(): JSX.Element {
         return
       }
       if (modalOpen) return
+      // Conversation panel: ⌘J on Mac, Ctrl+Shift+J on Windows. Ctrl+J is
+      // newline in most shells and we don't want to swallow it.
+      const wantsConv = IS_MAC
+        ? !e.shiftKey && e.key.toLowerCase() === 'j'
+        : e.shiftKey && e.key.toLowerCase() === 'j'
+      if (wantsConv) {
+        e.preventDefault()
+        setShowConversation((v) => !v)
+        return
+      }
       if (e.shiftKey && e.key.toLowerCase() === 'c') {
         e.preventDefault()
         if (!activeIdRef.current) return
@@ -728,9 +759,15 @@ export function App(): JSX.Element {
     }}
   ]
 
-  const gridCols = showBookmarks
-    ? `${sidebarWidth}px 4px 1fr 240px`
-    : `${sidebarWidth}px 4px 1fr`
+  // Right-hand panels (conversation, bookmarks) each add their own column
+  // when open. Conversation goes immediately to the right of the terminal;
+  // bookmarks slot in as a thinner column past it.
+  const gridCols = (() => {
+    let cols = `${sidebarWidth}px 4px 1fr`
+    if (showConversation) cols += ' 340px'
+    if (showBookmarks) cols += ' 240px'
+    return cols
+  })()
 
   const activeSession = sessions.find((s) => s.id === activeId) ?? null
 
@@ -777,8 +814,10 @@ export function App(): JSX.Element {
           setShowPalette((v) => !v)
         }}
         onToggleBookmarks={() => setShowBookmarks((v) => !v)}
+        onToggleConversation={() => setShowConversation((v) => !v)}
         onSettings={() => setShowSettings(true)}
         bookmarksOpen={showBookmarks}
+        conversationOpen={showConversation}
         onDelete={handleDelete}
         onRename={handleRename}
         onSetColor={handleSetColor}
@@ -849,6 +888,12 @@ export function App(): JSX.Element {
             />
           ))}
       </div>
+      {showConversation && (
+        <ConversationPanel
+          cwd={activeSession?.cwd ?? null}
+          onClose={() => setShowConversation(false)}
+        />
+      )}
       {showBookmarks && (
         <BookmarksPanel
           sessionId={activeId}
@@ -917,7 +962,14 @@ export function App(): JSX.Element {
         />
       )}
       {showScrollback && activeId && (
-        <ScrollbackOverlay sessionId={activeId} onClose={() => setShowScrollback(false)} />
+        <ScrollbackOverlay
+          sessionId={activeId}
+          initialSearch={scrollbackInitialSearch}
+          onClose={() => {
+            setShowScrollback(false)
+            setScrollbackInitialSearch(undefined)
+          }}
+        />
       )}
       {!settings.ui.welcomeShown && (
         <WelcomeDialog
