@@ -260,11 +260,35 @@ const api = {
       lastSeen: number
     }>
     byDay: Array<{ date: string; prompts: number; activeMs: number }>
+    prev: {
+      prompts: number
+      activeMs: number
+      bookmarks: number
+      projectsTouched: number
+    }
   }> => ipcRenderer.invoke('stats:get-summary', rangeDays),
   getStatsHeatmap: (
     rangeDays: number
   ): Promise<{ cells: number[][]; max: number; rangeDays: number }> =>
     ipcRenderer.invoke('stats:get-heatmap', rangeDays),
+  getProjectDetail: (
+    cwd: string,
+    rangeDays: number
+  ): Promise<{
+    cwd: string
+    name: string
+    rangeDays: number
+    totalPrompts: number
+    totalActiveMs: number
+    bookmarks: number
+    sessions: number
+    hebrewPercent: number
+    firstSeen: number
+    lastSeen: number
+    byDay: Array<{ date: string; prompts: number; activeMs: number }>
+    byHour: number[]
+    prev: { prompts: number; activeMs: number; bookmarks: number }
+  } | null> => ipcRenderer.invoke('stats:get-project-detail', cwd, rangeDays),
   recordPrompt: (sessionId: string, text: string): Promise<void> =>
     ipcRenderer.invoke('stats:record-prompt', sessionId, text)
 }

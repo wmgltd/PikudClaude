@@ -111,6 +111,13 @@ export interface ProjectStats {
   lastSeen: number
 }
 
+export interface PeriodTotals {
+  prompts: number
+  activeMs: number
+  bookmarks: number
+  projectsTouched: number
+}
+
 export interface Summary {
   rangeDays: number
   startTs: number
@@ -122,6 +129,9 @@ export interface Summary {
   hebrewPercent: number
   projects: ProjectStats[]
   byDay: Array<{ date: string; prompts: number; activeMs: number }>
+  // Same metrics for the period immediately preceding this one (e.g., for
+  // rangeDays=7, prev is the 7 days before that). Used for delta display.
+  prev: PeriodTotals
 }
 
 export interface Heatmap {
@@ -166,10 +176,40 @@ function projectDisplayName(cwd: string): string {
   return parts[parts.length - 1] || cwd
 }
 
+function aggregateTotals(events: StatsEvent[]): PeriodTotals {
+  const buckets = new Set<number>()
+  const cwds = new Set<string>()
+  let prompts = 0
+  let bookmarks = 0
+  for (const e of events) {
+    if (!e.cwd) continue
+    const meaningful =
+      e.type === 'prompt_sent' ||
+      e.type === 'bookmark_created' ||
+      (e.type === 'status_change' && (e.status === 'working' || e.status === 'awaiting'))
+    if (meaningful) {
+      cwds.add(e.cwd)
+      buckets.add(Math.floor(e.ts / BUCKET_MS))
+    }
+    if (e.type === 'prompt_sent') prompts++
+    else if (e.type === 'bookmark_created') bookmarks++
+  }
+  return {
+    prompts,
+    activeMs: buckets.size * BUCKET_MS,
+    bookmarks,
+    projectsTouched: cwds.size
+  }
+}
+
 export function getSummary(rangeDays: number): Summary {
   const now = Date.now()
   const startTs = now - rangeDays * DAY_MS
-  const events = readAllEvents().filter((e) => e.ts >= startTs && e.ts <= now)
+  const prevStartTs = startTs - rangeDays * DAY_MS
+  const allEvents = readAllEvents()
+  const events = allEvents.filter((e) => e.ts >= startTs && e.ts <= now)
+  const prevEvents = allEvents.filter((e) => e.ts >= prevStartTs && e.ts < startTs)
+  const prev = aggregateTotals(prevEvents)
 
   // Per-project aggregation
   const proj = new Map<string, ProjectStats & { _activeBuckets: Set<number>; _sessions: Set<string> }>()
@@ -262,7 +302,98 @@ export function getSummary(rangeDays: number): Summary {
     projectsTouched: projects.filter((p) => p.prompts > 0 || p.activeMs > 0).length,
     hebrewPercent: totalPrompts > 0 ? Math.round((hebrewPrompts / totalPrompts) * 100) : 0,
     projects,
-    byDay
+    byDay,
+    prev
+  }
+}
+
+export interface ProjectDetail {
+  cwd: string
+  name: string
+  rangeDays: number
+  totalPrompts: number
+  totalActiveMs: number
+  bookmarks: number
+  sessions: number
+  hebrewPercent: number
+  firstSeen: number
+  lastSeen: number
+  byDay: Array<{ date: string; prompts: number; activeMs: number }>
+  byHour: number[]
+  prev: { prompts: number; activeMs: number; bookmarks: number }
+}
+
+export function getProjectDetail(cwd: string, rangeDays: number): ProjectDetail | null {
+  const now = Date.now()
+  const startTs = now - rangeDays * DAY_MS
+  const prevStartTs = startTs - rangeDays * DAY_MS
+  const allEvents = readAllEvents().filter((e) => e.cwd === cwd)
+  if (allEvents.length === 0) return null
+  const events = allEvents.filter((e) => e.ts >= startTs && e.ts <= now)
+  const prevEvents = allEvents.filter((e) => e.ts >= prevStartTs && e.ts < startTs)
+
+  const dayMap = new Map<string, { prompts: number; activeBuckets: Set<number> }>()
+  const byHour: Array<Set<number>> = Array.from({ length: 24 }, () => new Set<number>())
+  const sessions = new Set<string>()
+  const activeBuckets = new Set<number>()
+  let prompts = 0
+  let bookmarks = 0
+  let hebrewPrompts = 0
+  let firstSeen = Infinity
+  let lastSeen = -Infinity
+
+  for (const e of events) {
+    sessions.add(e.sessionId)
+    if (e.ts < firstSeen) firstSeen = e.ts
+    if (e.ts > lastSeen) lastSeen = e.ts
+
+    const meaningful =
+      e.type === 'prompt_sent' ||
+      e.type === 'bookmark_created' ||
+      (e.type === 'status_change' && (e.status === 'working' || e.status === 'awaiting'))
+
+    const dk = dateKey(e.ts)
+    if (!dayMap.has(dk)) dayMap.set(dk, { prompts: 0, activeBuckets: new Set() })
+    const day = dayMap.get(dk)!
+
+    if (meaningful) {
+      const b = Math.floor(e.ts / BUCKET_MS)
+      activeBuckets.add(b)
+      day.activeBuckets.add(b)
+      byHour[new Date(e.ts).getHours()].add(b)
+    }
+    if (e.type === 'prompt_sent') {
+      prompts++
+      day.prompts++
+      if (e.hebrew) hebrewPrompts++
+    } else if (e.type === 'bookmark_created') {
+      bookmarks++
+    }
+  }
+
+  const prev = aggregateTotals(prevEvents)
+  const byDay = Array.from(dayMap.entries())
+    .map(([date, d]) => ({
+      date,
+      prompts: d.prompts,
+      activeMs: d.activeBuckets.size * BUCKET_MS
+    }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
+
+  return {
+    cwd,
+    name: projectDisplayName(cwd),
+    rangeDays,
+    totalPrompts: prompts,
+    totalActiveMs: activeBuckets.size * BUCKET_MS,
+    bookmarks,
+    sessions: sessions.size,
+    hebrewPercent: prompts > 0 ? Math.round((hebrewPrompts / prompts) * 100) : 0,
+    firstSeen: firstSeen === Infinity ? 0 : firstSeen,
+    lastSeen: lastSeen === -Infinity ? 0 : lastSeen,
+    byDay,
+    byHour: byHour.map((s) => s.size),
+    prev: { prompts: prev.prompts, activeMs: prev.activeMs, bookmarks: prev.bookmarks }
   }
 }
 

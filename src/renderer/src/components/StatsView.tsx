@@ -21,6 +21,12 @@ interface Summary {
     lastSeen: number
   }>
   byDay: Array<{ date: string; prompts: number; activeMs: number }>
+  prev: {
+    prompts: number
+    activeMs: number
+    bookmarks: number
+    projectsTouched: number
+  }
 }
 
 interface Heatmap {
@@ -50,6 +56,7 @@ export function StatsView(): JSX.Element {
   const [heatmap, setHeatmap] = useState<Heatmap | null>(null)
   const [loading, setLoading] = useState(true)
   const [tip, setTip] = useState<Tip | null>(null)
+  const [selectedCwd, setSelectedCwd] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -90,6 +97,13 @@ export function StatsView(): JSX.Element {
   return (
     <div className="stats-view" onMouseMove={onMouseMove} onMouseLeave={onMouseLeave}>
       {tip && <StatsTooltip tip={tip} />}
+      {selectedCwd && (
+        <ProjectDetailModal
+          cwd={selectedCwd}
+          rangeDays={range}
+          onClose={() => setSelectedCwd(null)}
+        />
+      )}
       <div className="stats-header">
         <div className="stats-title">
           <h2>Stats</h2>
@@ -117,15 +131,36 @@ export function StatsView(): JSX.Element {
       {!loading && summary && (
         <>
           <div className="stats-kpis">
-            <KPI label="Prompts" value={summary.totalPrompts.toLocaleString()} hint={
-              summary.hebrewPercent > 0 ? `${summary.hebrewPercent}% in Hebrew` : undefined
-            } />
-            <KPI label="Active hours" value={formatHours(summary.totalActiveMs)} hint="5-min activity buckets" />
-            <KPI label="Projects touched" value={summary.projectsTouched.toString()} />
-            <KPI label="Bookmarks" value={summary.totalBookmarks.toString()} hint="created in range" />
+            <KPI
+              label="Prompts"
+              value={summary.totalPrompts.toLocaleString()}
+              hint={summary.hebrewPercent > 0 ? `${summary.hebrewPercent}% in Hebrew` : undefined}
+              delta={computeDelta(summary.totalPrompts, summary.prev.prompts)}
+              rangeDays={range}
+            />
+            <KPI
+              label="Active hours"
+              value={formatHours(summary.totalActiveMs)}
+              hint="5-min activity buckets"
+              delta={computeDelta(summary.totalActiveMs, summary.prev.activeMs)}
+              rangeDays={range}
+            />
+            <KPI
+              label="Projects touched"
+              value={summary.projectsTouched.toString()}
+              delta={computeDelta(summary.projectsTouched, summary.prev.projectsTouched)}
+              rangeDays={range}
+            />
+            <KPI
+              label="Bookmarks"
+              value={summary.totalBookmarks.toString()}
+              hint="created in range"
+              delta={computeDelta(summary.totalBookmarks, summary.prev.bookmarks)}
+              rangeDays={range}
+            />
           </div>
 
-          <ProjectColumnChart projects={summary.projects} />
+          <ProjectColumnChart projects={summary.projects} onSelect={setSelectedCwd} />
 
           {heatmap && <HeatmapGrid heatmap={heatmap} />}
 
@@ -161,19 +196,66 @@ function StatsTooltip({ tip }: { tip: Tip }): JSX.Element {
   )
 }
 
+interface Delta {
+  kind: 'up' | 'down' | 'flat' | 'new'
+  pct: number | null
+}
+
+function computeDelta(curr: number, prev: number): Delta {
+  if (prev === 0 && curr === 0) return { kind: 'flat', pct: 0 }
+  if (prev === 0) return { kind: 'new', pct: null }
+  const pct = Math.round(((curr - prev) / prev) * 100)
+  if (pct === 0) return { kind: 'flat', pct: 0 }
+  return { kind: pct > 0 ? 'up' : 'down', pct }
+}
+
+function rangeLabel(days: Range): string {
+  return days === 7 ? 'last week' : days === 30 ? 'previous month' : days === 90 ? 'previous quarter' : 'previous year'
+}
+
 function KPI({
   label,
   value,
-  hint
+  hint,
+  delta,
+  rangeDays
 }: {
   label: string
   value: string
   hint?: string
+  delta?: Delta
+  rangeDays?: Range
 }): JSX.Element {
+  const prevLabel = rangeDays ? rangeLabel(rangeDays) : 'previous period'
   return (
-    <div className="stats-kpi" data-tip={`${label}: ${value}${hint ? ` (${hint})` : ''}`}>
+    <div
+      className="stats-kpi"
+      data-tip={
+        delta
+          ? `${label}: ${value}${
+              delta.kind === 'new'
+                ? ` — no data for ${prevLabel}`
+                : delta.kind === 'flat'
+                ? ` — same as ${prevLabel}`
+                : ` — ${delta.pct! > 0 ? '+' : ''}${delta.pct}% vs ${prevLabel}`
+            }`
+          : `${label}: ${value}${hint ? ` (${hint})` : ''}`
+      }
+    >
       <div className="stats-kpi-value">{value}</div>
-      <div className="stats-kpi-label">{label}</div>
+      <div className="stats-kpi-row">
+        <div className="stats-kpi-label">{label}</div>
+        {delta && delta.kind !== 'new' && (
+          <span className={`stats-kpi-delta delta-${delta.kind}`}>
+            {delta.kind === 'up' && '▲ '}
+            {delta.kind === 'down' && '▼ '}
+            {delta.kind === 'flat' ? '—' : `${Math.abs(delta.pct!)}%`}
+          </span>
+        )}
+        {delta && delta.kind === 'new' && (
+          <span className="stats-kpi-delta delta-new">new</span>
+        )}
+      </div>
       {hint && <div className="stats-kpi-hint">{hint}</div>}
     </div>
   )
@@ -182,9 +264,11 @@ function KPI({
 type ProjectMetric = 'time' | 'prompts'
 
 function ProjectColumnChart({
-  projects
+  projects,
+  onSelect
 }: {
   projects: Summary['projects']
+  onSelect: (cwd: string) => void
 }): JSX.Element | null {
   const [metric, setMetric] = useState<ProjectMetric>('time')
   const top = useMemo(() => {
@@ -227,8 +311,17 @@ function ProjectColumnChart({
           return (
             <div
               key={p.cwd}
-              className="stats-col"
-              data-tip={`${p.name} — ${formatHours(p.activeMs)}, ${p.prompts.toLocaleString()} prompts${p.bookmarks ? `, ${p.bookmarks} bookmarks` : ''}`}
+              className="stats-col stats-col-clickable"
+              data-tip={`${p.name} — click for details. ${formatHours(p.activeMs)}, ${p.prompts.toLocaleString()} prompts${p.bookmarks ? `, ${p.bookmarks} bookmarks` : ''}`}
+              onClick={() => onSelect(p.cwd)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  onSelect(p.cwd)
+                }
+              }}
             >
               <div className="stats-col-bar-wrap">
                 <div className="stats-col-value">{formatValue(v)}</div>
@@ -330,4 +423,225 @@ function formatHours(ms: number): string {
   if (h === 0) return `${m}m`
   if (m === 0) return `${h}h`
   return `${h}h ${m}m`
+}
+
+interface ProjectDetailData {
+  cwd: string
+  name: string
+  rangeDays: number
+  totalPrompts: number
+  totalActiveMs: number
+  bookmarks: number
+  sessions: number
+  hebrewPercent: number
+  firstSeen: number
+  lastSeen: number
+  byDay: Array<{ date: string; prompts: number; activeMs: number }>
+  byHour: number[]
+  prev: { prompts: number; activeMs: number; bookmarks: number }
+}
+
+function ProjectDetailModal({
+  cwd,
+  rangeDays,
+  onClose
+}: {
+  cwd: string
+  rangeDays: Range
+  onClose: () => void
+}): JSX.Element {
+  const [data, setData] = useState<ProjectDetailData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [tip, setTip] = useState<Tip | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    window.api
+      .getProjectDetail(cwd, rangeDays)
+      .then((d) => {
+        if (cancelled) return
+        setData(d)
+        setLoading(false)
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [cwd, rangeDays])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
+
+  const onMouseMove = (e: React.MouseEvent<HTMLDivElement>): void => {
+    const target = (e.target as HTMLElement).closest<HTMLElement>('[data-tip]')
+    if (!target) {
+      if (tip) setTip(null)
+      return
+    }
+    const text = target.dataset.tip || ''
+    if (!text) return
+    setTip({ text, x: e.clientX, y: e.clientY })
+  }
+
+  const peakHour = useMemo(() => {
+    if (!data) return null
+    let max = 0
+    let idx = -1
+    data.byHour.forEach((v, i) => {
+      if (v > max) {
+        max = v
+        idx = i
+      }
+    })
+    return max > 0 ? { hour: idx, count: max } : null
+  }, [data])
+
+  return (
+    <div className="dialog-backdrop" onClick={onClose}>
+      <div
+        className="dialog project-detail-dialog"
+        onClick={(e) => e.stopPropagation()}
+        onMouseMove={onMouseMove}
+        onMouseLeave={() => setTip(null)}
+      >
+        {tip && <StatsTooltip tip={tip} />}
+        <div className="project-detail-header">
+          <div>
+            <h2>{data?.name ?? '…'}</h2>
+            <div className="project-detail-path">{cwd}</div>
+          </div>
+          <button
+            type="button"
+            className="scrollback-close"
+            onClick={(e) => {
+              e.stopPropagation()
+              onClose()
+            }}
+            title="Close (Esc)"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        {loading && <div className="stats-loading">loading…</div>}
+        {!loading && !data && (
+          <div className="stats-empty">no activity recorded for this project</div>
+        )}
+        {!loading && data && (
+          <div className="project-detail-body">
+            <div className="stats-kpis">
+              <KPI
+                label="Prompts"
+                value={data.totalPrompts.toLocaleString()}
+                hint={data.hebrewPercent > 0 ? `${data.hebrewPercent}% in Hebrew` : undefined}
+                delta={computeDelta(data.totalPrompts, data.prev.prompts)}
+                rangeDays={rangeDays}
+              />
+              <KPI
+                label="Active hours"
+                value={formatHours(data.totalActiveMs)}
+                delta={computeDelta(data.totalActiveMs, data.prev.activeMs)}
+                rangeDays={rangeDays}
+              />
+              <KPI
+                label="Sessions"
+                value={data.sessions.toString()}
+              />
+              <KPI
+                label="Bookmarks"
+                value={data.bookmarks.toString()}
+                delta={computeDelta(data.bookmarks, data.prev.bookmarks)}
+                rangeDays={rangeDays}
+              />
+            </div>
+
+            <div className="stats-section">
+              <div className="stats-section-title">By hour of day</div>
+              <ByHourBars hours={data.byHour} peakHour={peakHour} />
+            </div>
+
+            {data.byDay.length > 0 && (
+              <div className="stats-section">
+                <div className="stats-section-title">Daily activity</div>
+                <div className="stats-daily">
+                  {data.byDay.map((d) => {
+                    const max = Math.max(...data.byDay.map((x) => x.prompts), 1)
+                    const h = (d.prompts / max) * 100
+                    return (
+                      <div
+                        key={d.date}
+                        className="stats-daily-col"
+                        data-tip={`${d.date} — ${d.prompts.toLocaleString()} prompts, ${formatHours(d.activeMs)} active`}
+                      >
+                        <div className="stats-daily-bar" style={{ height: `${Math.max(h, 2)}%` }} />
+                        <div className="stats-daily-date">{d.date.slice(5)}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="project-detail-meta">
+              <div>
+                <span className="project-detail-meta-label">First activity</span>
+                <span>{data.firstSeen ? new Date(data.firstSeen).toLocaleString() : '—'}</span>
+              </div>
+              <div>
+                <span className="project-detail-meta-label">Last activity</span>
+                <span>{data.lastSeen ? new Date(data.lastSeen).toLocaleString() : '—'}</span>
+              </div>
+              {peakHour && (
+                <div>
+                  <span className="project-detail-meta-label">Peak hour</span>
+                  <span>
+                    {String(peakHour.hour).padStart(2, '0')}:00 · {formatHours(peakHour.count * 5 * 60 * 1000)}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ByHourBars({
+  hours,
+  peakHour
+}: {
+  hours: number[]
+  peakHour: { hour: number; count: number } | null
+}): JSX.Element {
+  const max = Math.max(...hours, 1)
+  return (
+    <div className="stats-hour-bars">
+      {hours.map((v, h) => {
+        const pct = (v / max) * 100
+        const isPeak = peakHour?.hour === h && v > 0
+        return (
+          <div
+            key={h}
+            className={`stats-hour-col ${isPeak ? 'peak' : ''}`}
+            data-tip={`${String(h).padStart(2, '0')}:00 — ${formatHours(v * 5 * 60 * 1000)} (${v} active ${v === 1 ? 'bucket' : 'buckets'})`}
+          >
+            <div className="stats-hour-bar" style={{ height: `${Math.max(pct, v > 0 ? 4 : 0)}%` }} />
+            {h % 3 === 0 && <div className="stats-hour-label">{h}</div>}
+          </div>
+        )
+      })}
+    </div>
+  )
 }

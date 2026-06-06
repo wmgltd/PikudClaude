@@ -23,7 +23,8 @@ import {
   recordSessionClosed,
   recordBookmarkCreated,
   getSummary,
-  getHeatmap
+  getHeatmap,
+  getProjectDetail
 } from './stats'
 import type { CreateSessionOpts, ImportSessionOpts } from './types'
 
@@ -216,6 +217,9 @@ function wireIpc(): void {
   // Stats dashboard: read aggregated metrics from the event log.
   ipcMain.handle('stats:get-summary', (_e, rangeDays: number) => getSummary(rangeDays))
   ipcMain.handle('stats:get-heatmap', (_e, rangeDays: number) => getHeatmap(rangeDays))
+  ipcMain.handle('stats:get-project-detail', (_e, cwd: string, rangeDays: number) =>
+    getProjectDetail(cwd, rangeDays)
+  )
   // Prompts are sent via raw writeSession keystrokes (not tmux:send-text), so
   // the renderer's onPromptSubmit callback is the only reliable signal that
   // a prompt was submitted. It calls this IPC after each submission.
