@@ -16,6 +16,15 @@ import {
   savePromptStats
 } from './store'
 import { watchConversation } from './conversation'
+import {
+  recordPromptSent,
+  recordStatusChange,
+  recordSessionCreated,
+  recordSessionClosed,
+  recordBookmarkCreated,
+  getSummary,
+  getHeatmap
+} from './stats'
 import type { CreateSessionOpts, ImportSessionOpts } from './types'
 
 const isDev = !app.isPackaged
@@ -97,10 +106,19 @@ async function createWindow(): Promise<void> {
 }
 
 function wireIpc(): void {
+  // Look up the cwd for a session id from the manager's current list. Returns
+  // empty string if not found — stats helpers no-op on missing cwd.
+  const cwdOf = (id: string): string => {
+    const s = manager.list().find((x) => x.id === id)
+    return s?.cwd ?? ''
+  }
+
   ipcMain.handle('tmux:list', () => manager.list())
 
   ipcMain.handle('tmux:create', async (_e, opts: CreateSessionOpts) => {
-    return manager.create(opts)
+    const meta = await manager.create(opts)
+    recordSessionCreated(meta.id, meta.cwd, meta.name)
+    return meta
   })
 
   ipcMain.handle('tmux:list-external', () => manager.listExternal())
@@ -110,8 +128,10 @@ function wireIpc(): void {
   })
 
   ipcMain.handle('tmux:kill', async (_e, id: string) => {
+    const cwd = cwdOf(id)
     await manager.kill(id)
     bookmarks.removeAllForSession(id)
+    if (cwd) recordSessionClosed(id, cwd)
   })
 
   ipcMain.handle('tmux:attach', async (_e, id: string, cols: number, rows: number) => {
@@ -128,6 +148,7 @@ function wireIpc(): void {
 
   ipcMain.handle('tmux:send-text', async (_e, id: string, text: string) => {
     await manager.sendText(id, text)
+    recordPromptSent(id, cwdOf(id), text)
   })
 
   ipcMain.handle('tmux:resize', (_e, id: string, cols: number, rows: number) => {
@@ -192,6 +213,16 @@ function wireIpc(): void {
     convWatcher = null
   })
 
+  // Stats dashboard: read aggregated metrics from the event log.
+  ipcMain.handle('stats:get-summary', (_e, rangeDays: number) => getSummary(rangeDays))
+  ipcMain.handle('stats:get-heatmap', (_e, rangeDays: number) => getHeatmap(rangeDays))
+  // Prompts are sent via raw writeSession keystrokes (not tmux:send-text), so
+  // the renderer's onPromptSubmit callback is the only reliable signal that
+  // a prompt was submitted. It calls this IPC after each submission.
+  ipcMain.handle('stats:record-prompt', (_e, sessionId: string, text: string) => {
+    recordPromptSent(sessionId, cwdOf(sessionId), text)
+  })
+
   ipcMain.handle('dialog:pick-directory', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
@@ -212,7 +243,9 @@ function wireIpc(): void {
       } catch {
         snapshot = ''
       }
-      return bookmarks.create(sessionId, label, snapshot)
+      const bm = bookmarks.create(sessionId, label, snapshot)
+      recordBookmarkCreated(sessionId, cwdOf(sessionId))
+      return bm
     }
   )
 
@@ -339,10 +372,18 @@ function wireIpc(): void {
   }
 
   manager.on('data', (id: string, data: string) => safeSend('tmux:data', id, data))
-  manager.on('exit', (id: string) => safeSend('tmux:exit', id))
+  manager.on('exit', (id: string) => {
+    const cwd = cwdOf(id)
+    safeSend('tmux:exit', id)
+    if (cwd) recordSessionClosed(id, cwd)
+  })
   manager.on('status', (id: string, status: string) => {
     safeSend('tmux:status', id, status)
     updateBadgeCount()
+    const cwd = cwdOf(id)
+    if (cwd && (status === 'working' || status === 'idle' || status === 'awaiting' || status === 'detached')) {
+      recordStatusChange(id, cwd, status)
+    }
   })
 }
 

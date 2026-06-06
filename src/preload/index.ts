@@ -237,7 +237,36 @@ const api = {
     ipcRenderer.invoke('errors:log-renderer', entry),
   revealErrorLog: (): Promise<void> => ipcRenderer.invoke('errors:reveal-log'),
 
-  installUpdateNow: (): Promise<void> => ipcRenderer.invoke('updates:install-now')
+  installUpdateNow: (): Promise<void> => ipcRenderer.invoke('updates:install-now'),
+
+  getStatsSummary: (
+    rangeDays: number
+  ): Promise<{
+    rangeDays: number
+    startTs: number
+    endTs: number
+    totalPrompts: number
+    totalActiveMs: number
+    totalBookmarks: number
+    projectsTouched: number
+    hebrewPercent: number
+    projects: Array<{
+      cwd: string
+      name: string
+      prompts: number
+      activeMs: number
+      bookmarks: number
+      sessions: number
+      lastSeen: number
+    }>
+    byDay: Array<{ date: string; prompts: number; activeMs: number }>
+  }> => ipcRenderer.invoke('stats:get-summary', rangeDays),
+  getStatsHeatmap: (
+    rangeDays: number
+  ): Promise<{ cells: number[][]; max: number; rangeDays: number }> =>
+    ipcRenderer.invoke('stats:get-heatmap', rangeDays),
+  recordPrompt: (sessionId: string, text: string): Promise<void> =>
+    ipcRenderer.invoke('stats:record-prompt', sessionId, text)
 }
 
 contextBridge.exposeInMainWorld('api', api)

@@ -20,7 +20,7 @@ interface Props {
   needsAttention: Set<string>
   bookmarksOpen: boolean
   conversationOpen: boolean
-  view: 'terminal' | 'dashboard'
+  view: 'terminal' | 'dashboard' | 'stats'
   onSelect: (id: string) => void
   onNew: () => void
   onImport: () => void
@@ -29,7 +29,7 @@ interface Props {
   onToggleBookmarks: () => void
   onToggleConversation: () => void
   onSettings: () => void
-  onSetView: (v: 'terminal' | 'dashboard') => void
+  onSetView: (v: 'terminal' | 'dashboard' | 'stats') => void
   onDelete: (id: string) => void
   onRename: (id: string, name: string) => void
   onSetColor: (id: string, color: string) => void
@@ -215,6 +215,16 @@ export function Sidebar({
               {awaitingCount}
             </span>
           )}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'stats'}
+          className={`sidebar-view-tab ${view === 'stats' ? 'active' : ''}`}
+          onClick={() => onSetView('stats')}
+          title="Stats"
+        >
+          Stats
         </button>
       </div>
       <div className="sidebar-list">

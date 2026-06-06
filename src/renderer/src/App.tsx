@@ -12,6 +12,7 @@ import { UpdateAvailableDialog } from './components/UpdateAvailableDialog'
 import { WelcomeDialog } from './components/WelcomeDialog'
 import { ScrollbackOverlay } from './components/ScrollbackOverlay'
 import { Dashboard } from './components/Dashboard'
+import { StatsView } from './components/StatsView'
 import { ConversationPanel } from './components/ConversationPanel'
 import { IS_MAC } from './utils/platform'
 import type { SessionMeta, SessionStatus, Settings } from './types'
@@ -152,7 +153,7 @@ export function App(): JSX.Element {
   const [scrollbackInitialSearch, setScrollbackInitialSearch] = useState<string | undefined>(
     undefined
   )
-  const [view, setView] = useState<'terminal' | 'dashboard'>('terminal')
+  const [view, setView] = useState<'terminal' | 'dashboard' | 'stats'>('terminal')
   const [promptHistory, setPromptHistory] = useState<
     Record<string, Array<{ text: string; ts: number }>>
   >({})
@@ -840,6 +841,7 @@ export function App(): JSX.Element {
             }}
           />
         )}
+        {view === 'stats' && <StatsView />}
         {sessions.length === 0 && view === 'terminal' && (
           <div className="terminal-empty">
             no sessions yet — hit <kbd>+</kbd> in the sidebar to start one
@@ -865,6 +867,10 @@ export function App(): JSX.Element {
               preferredIDE={settings.sessions.preferredIDE}
               onOpenScrollback={() => setShowScrollback(true)}
               onPromptSubmit={(prompt) => {
+                // Stats are recorded regardless of trackPrompts (which only
+                // controls the per-session prompt history shown in the UI).
+                // Stats stores only length+language, no text.
+                window.api.recordPrompt(s.id, prompt).catch(() => undefined)
                 if (!settingsRef.current.sessions.trackPrompts) return
                 const now = Date.now()
                 setPromptHistory((prev) => {

@@ -9,7 +9,7 @@ interface Props {
   lastPromptTs?: number | null
   status?: SessionStatus
   onClearPromptHistory?: () => void
-  view: 'terminal' | 'dashboard'
+  view: 'terminal' | 'dashboard' | 'stats'
   onToggleView: () => void
 }
 
