@@ -38,11 +38,18 @@ const RANGE_LABELS: Record<Range, string> = {
 
 const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
 
+interface Tip {
+  text: string
+  x: number
+  y: number
+}
+
 export function StatsView(): JSX.Element {
   const [range, setRange] = useState<Range>(30)
   const [summary, setSummary] = useState<Summary | null>(null)
   const [heatmap, setHeatmap] = useState<Heatmap | null>(null)
   const [loading, setLoading] = useState(true)
+  const [tip, setTip] = useState<Tip | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -62,8 +69,27 @@ export function StatsView(): JSX.Element {
     }
   }, [range])
 
+  // Delegated hover tooltip: any element with data-tip under the stats view
+  // gets a styled tooltip following the cursor. Beats `title` for instant
+  // feedback (no ~500ms browser delay) and consistent styling.
+  const onMouseMove = (e: React.MouseEvent<HTMLDivElement>): void => {
+    const target = (e.target as HTMLElement).closest<HTMLElement>('[data-tip]')
+    if (!target) {
+      if (tip) setTip(null)
+      return
+    }
+    const text = target.dataset.tip || ''
+    if (!text) {
+      if (tip) setTip(null)
+      return
+    }
+    setTip({ text, x: e.clientX, y: e.clientY })
+  }
+  const onMouseLeave = (): void => setTip(null)
+
   return (
-    <div className="stats-view">
+    <div className="stats-view" onMouseMove={onMouseMove} onMouseLeave={onMouseLeave}>
+      {tip && <StatsTooltip tip={tip} />}
       <div className="stats-header">
         <div className="stats-title">
           <h2>Stats</h2>
@@ -119,6 +145,22 @@ export function StatsView(): JSX.Element {
   )
 }
 
+function StatsTooltip({ tip }: { tip: Tip }): JSX.Element {
+  // Position above-and-right of the cursor; nudge inward if it would clip.
+  const style: React.CSSProperties = {
+    position: 'fixed',
+    left: Math.min(tip.x + 12, window.innerWidth - 280),
+    top: Math.max(tip.y - 36, 8),
+    pointerEvents: 'none',
+    zIndex: 1000
+  }
+  return (
+    <div className="stats-tip" style={style}>
+      {tip.text}
+    </div>
+  )
+}
+
 function KPI({
   label,
   value,
@@ -129,7 +171,7 @@ function KPI({
   hint?: string
 }): JSX.Element {
   return (
-    <div className="stats-kpi">
+    <div className="stats-kpi" data-tip={`${label}: ${value}${hint ? ` (${hint})` : ''}`}>
       <div className="stats-kpi-value">{value}</div>
       <div className="stats-kpi-label">{label}</div>
       {hint && <div className="stats-kpi-hint">{hint}</div>}
@@ -186,7 +228,7 @@ function ProjectColumnChart({
             <div
               key={p.cwd}
               className="stats-col"
-              title={`${p.name}\n${p.cwd}\n${formatHours(p.activeMs)} · ${p.prompts} prompts`}
+              data-tip={`${p.name} — ${formatHours(p.activeMs)}, ${p.prompts.toLocaleString()} prompts${p.bookmarks ? `, ${p.bookmarks} bookmarks` : ''}`}
             >
               <div className="stats-col-bar-wrap">
                 <div className="stats-col-value">{formatValue(v)}</div>
@@ -241,7 +283,7 @@ function Row({ day, row, max }: { day: number; row: number[]; max: number }): JS
             key={`d${day}h${h}`}
             className="stats-heatmap-cell"
             style={{ background: heatColor(intensity) }}
-            title={`${DAY_LABELS[day]} ${h}:00 — ${v} active buckets (${formatHours(v * 5 * 60 * 1000)})`}
+            data-tip={`${DAY_LABELS[day]} ${String(h).padStart(2, '0')}:00 — ${formatHours(v * 5 * 60 * 1000)} (${v} active ${v === 1 ? 'bucket' : 'buckets'})`}
           />
         )
       })}
@@ -258,7 +300,11 @@ function DailyTrend({ byDay }: { byDay: Summary['byDay'] }): JSX.Element {
         {byDay.map((d) => {
           const h = (d.prompts / max) * 100
           return (
-            <div key={d.date} className="stats-daily-col" title={`${d.date}: ${d.prompts} prompts, ${formatHours(d.activeMs)} active`}>
+            <div
+              key={d.date}
+              className="stats-daily-col"
+              data-tip={`${d.date} — ${d.prompts.toLocaleString()} prompts, ${formatHours(d.activeMs)} active`}
+            >
               <div className="stats-daily-bar" style={{ height: `${Math.max(h, 2)}%` }} />
               <div className="stats-daily-date">{d.date.slice(5)}</div>
             </div>

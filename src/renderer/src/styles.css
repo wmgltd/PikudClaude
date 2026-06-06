@@ -2600,3 +2600,36 @@ kbd {
   color: var(--text-dim);
   white-space: nowrap;
 }
+
+.stats-tip {
+  background: rgba(20, 20, 28, 0.96);
+  color: #ddd6fe;
+  border: 1px solid rgba(167, 139, 250, 0.4);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Subtle visual cue that a chart element is interactive — bumps opacity/ring
+   on hover so the user knows the tooltip is live. */
+.stats-col,
+.stats-daily-col,
+.stats-heatmap-cell,
+.stats-kpi {
+  cursor: default;
+}
+.stats-heatmap-cell:hover {
+  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.7);
+}
+.stats-col:hover .stats-col-bar {
+  filter: brightness(1.15);
+}
+.stats-daily-col:hover .stats-daily-bar {
+  filter: brightness(1.15);
+}
