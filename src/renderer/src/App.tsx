@@ -803,7 +803,17 @@ export function App(): JSX.Element {
         needsAttention={needsAttention}
         view={view}
         onSetView={setView}
-        onSelect={setActiveId}
+        onSelect={(id) => {
+          // Always fire a focus request — even if the session was already
+          // active, the user clicking the row implies "give me back the
+          // keyboard". setActiveId is a no-op in that case so the
+          // active-prop effect doesn't re-run focus() on its own.
+          setActiveId(id)
+          if (view !== 'terminal') setView('terminal')
+          requestAnimationFrame(() => {
+            window.dispatchEvent(new CustomEvent('pk:focus-terminal', { detail: id }))
+          })
+        }}
         onNew={() => setShowNewDialog(true)}
         onImport={() => setShowImportDialog(true)}
         onHelp={() => {

@@ -189,6 +189,10 @@ export class TmuxManager extends EventEmitter {
     this.sessions = stored
     saveSessions(this.sessions)
     this.startStatusTimer()
+    // Kick off an immediate probe so every restored session has a status
+    // ready to display — without this the sidebar would show stale badges
+    // until the first awaiting/status tick fires.
+    void this.tickAwaiting().then(() => this.tickStatuses())
   }
 
   private async resurrect(s: SessionMeta): Promise<void> {
@@ -237,9 +241,14 @@ export class TmuxManager extends EventEmitter {
 
   private tickStatuses(): void {
     const now = Date.now()
-    const seen = new Set<string>()
-    for (const id of this.attached.keys()) {
-      seen.add(id)
+    // Compute status for every alive session (not just attached). Without
+    // this, the sidebar shows stale statuses on app load until the user
+    // clicks each card. For non-attached sessions we don't have live data
+    // flow, so 'working' can't be detected — but awaiting/shell/idle are
+    // derivable from the pane command + awaiting probe alone.
+    const aliveIds = new Set(this.sessions.filter((s) => !s.dead).map((s) => s.id))
+    for (const id of aliveIds) {
+      const isAttached = this.attached.has(id)
       const samples = this.dataWindow.get(id) ?? []
       const recent = samples.filter((s) => now - s.ts < STATUS_WINDOW_MS)
       if (recent.length !== samples.length) this.dataWindow.set(id, recent)
@@ -249,15 +258,16 @@ export class TmuxManager extends EventEmitter {
       let status: SessionStatus
       if (this.awaitingMap.get(id)) status = 'awaiting'
       else if (!claudeRunning) status = 'shell'
-      else if (totalBytes > STATUS_BYTE_THRESHOLD) status = 'working'
+      else if (isAttached && totalBytes > STATUS_BYTE_THRESHOLD) status = 'working'
       else status = 'idle'
       if (this.lastEmittedStatus.get(id) !== status) {
         this.lastEmittedStatus.set(id, status)
         this.emit('status', id, status)
       }
     }
+    // Dead sessions broadcast 'detached' once then drop out of the map.
     for (const id of this.lastEmittedStatus.keys()) {
-      if (!seen.has(id)) {
+      if (!aliveIds.has(id)) {
         this.lastEmittedStatus.set(id, 'detached')
         this.emit('status', id, 'detached')
         this.lastEmittedStatus.delete(id)
@@ -266,25 +276,29 @@ export class TmuxManager extends EventEmitter {
   }
 
   private async tickAwaiting(): Promise<void> {
-    for (const id of this.attached.keys()) {
-      const s = this.getSession(id)
-      if (!s) continue
-      try {
-        const content = await this.capturePaneText(s.tmuxName, 30)
-        const isAwaiting = detectAwaiting(content)
-        this.awaitingMap.set(id, isAwaiting)
-      } catch {
-        /* capture failed; leave previous value */
-      }
-      try {
-        const { stdout } = await execFileAsync(resolveTmuxBin(), [
-          '-u', 'display-message', '-p', '-t', s.tmuxName, '#{pane_current_command}'
-        ])
-        this.paneCommandMap.set(id, stdout.trim())
-      } catch {
-        /* leave previous value */
-      }
-    }
+    // Probe every alive session in parallel — gives us awaiting state +
+    // current pane command for both attached and unattached sessions, so
+    // tickStatuses can render accurate badges sidebar-wide without the user
+    // needing to open each session first.
+    const alive = this.sessions.filter((s) => !s.dead)
+    await Promise.all(
+      alive.map(async (s) => {
+        try {
+          const content = await this.capturePaneText(s.tmuxName, 30)
+          this.awaitingMap.set(s.id, detectAwaiting(content))
+        } catch {
+          /* capture failed; leave previous value */
+        }
+        try {
+          const { stdout } = await execFileAsync(resolveTmuxBin(), [
+            '-u', 'display-message', '-p', '-t', s.tmuxName, '#{pane_current_command}'
+          ])
+          this.paneCommandMap.set(s.id, stdout.trim())
+        } catch {
+          /* leave previous value */
+        }
+      })
+    )
   }
 
   private async capturePaneText(tmuxName: string, lines = 30): Promise<string> {

@@ -483,6 +483,27 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
     return () => window.removeEventListener('pk:search', handler as EventListener)
   }, [active])
 
+  // Sidebar click → focus the terminal. The active-prop effect already
+  // focuses on activation, but it doesn't re-fire when clicking the already
+  // active session (active stays true). This event covers that case and
+  // also handles cases where focus drifted to a dialog/overlay/sidebar
+  // button. We defer to two RAFs so the click's own focus-stealing settles
+  // first, then we steal it back.
+  useEffect(() => {
+    const handler = (e: Event): void => {
+      const id = (e as CustomEvent<string>).detail
+      if (id && id !== session.id) return
+      if (!active) return
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          termRef.current?.focus()
+        })
+      })
+    }
+    window.addEventListener('pk:focus-terminal', handler as EventListener)
+    return () => window.removeEventListener('pk:focus-terminal', handler as EventListener)
+  }, [active, session.id])
+
   useEffect(() => {
     const term = termRef.current
     const fit = fitRef.current
@@ -541,8 +562,22 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
         }
       })
       window.addEventListener('resize', onResize)
+      // Also watch the terminal host element directly so layout changes
+      // outside the window (e.g., the conversation panel opening to the
+      // right shrinks our column) refit the canvas immediately. Without
+      // this, the xterm canvas briefly appears to extend under the new
+      // panel until the next window resize.
+      const host = hostRef.current
+      let ro: ResizeObserver | null = null
+      if (host && typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(() => onResize())
+        ro.observe(host)
+      }
       term.focus()
-      return () => window.removeEventListener('resize', onResize)
+      return () => {
+        window.removeEventListener('resize', onResize)
+        ro?.disconnect()
+      }
     }
     try {
       const buffer = term.buffer.active
