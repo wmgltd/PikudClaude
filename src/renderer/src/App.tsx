@@ -349,6 +349,19 @@ export function App(): JSX.Element {
     return window.api.onNotificationClick((id) => setActiveId(id))
   }, [])
 
+  // System resumed from sleep / screen unlocked — pull a fresh snapshot of
+  // sessions + statuses (the main process already re-probed tmux) and tell
+  // the active terminal to refit, since its IPC stream may have a backlog
+  // and its canvas may be sized to a stale layout.
+  useEffect(() => {
+    return window.api.onAppResumed(() => {
+      refresh().catch(() => undefined)
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new Event('resize'))
+      })
+    })
+  }, [refresh])
+
   // Conv-panel bubble click → open ScrollbackOverlay with the snippet
   // highlighted. We don't try to scroll xterm itself: while Claude is
   // running it owns the alt-screen, so xterm's normal-buffer scrollback is

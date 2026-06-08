@@ -290,7 +290,12 @@ const api = {
     prev: { prompts: number; activeMs: number; bookmarks: number }
   } | null> => ipcRenderer.invoke('stats:get-project-detail', cwd, rangeDays),
   recordPrompt: (sessionId: string, text: string): Promise<void> =>
-    ipcRenderer.invoke('stats:record-prompt', sessionId, text)
+    ipcRenderer.invoke('stats:record-prompt', sessionId, text),
+  onAppResumed: (handler: () => void): (() => void) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('app:resumed', listener)
+    return () => ipcRenderer.removeListener('app:resumed', listener)
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)

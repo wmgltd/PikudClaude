@@ -239,6 +239,29 @@ export class TmuxManager extends EventEmitter {
     this.awaitingTimer = setInterval(() => this.tickAwaiting(), AWAITING_POLL_MS)
   }
 
+  /**
+   * Force an immediate status refresh — used after macOS wake-from-sleep,
+   * where the pollers were paused and tmux may have killed sessions while
+   * the system was suspended.
+   */
+  async refreshAfterResume(): Promise<void> {
+    // Re-check whether each previously-alive tmux session still exists.
+    // A long enough sleep can take the tmux server down (or macOS may have
+    // pruned it). Mark missing ones dead so the sidebar shows them
+    // correctly and so attach() resurrects them on next user click.
+    for (const s of this.sessions) {
+      if (s.dead) continue
+      try {
+        const exists = await tmuxSessionExistsByName(s.tmuxName)
+        if (!exists) s.dead = true
+      } catch {
+        /* ignore — treat as still alive, next tick will retry */
+      }
+    }
+    await this.tickAwaiting()
+    this.tickStatuses()
+  }
+
   private tickStatuses(): void {
     const now = Date.now()
     // Compute status for every alive session (not just attached). Without

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, Notification, Menu, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, Notification, Menu, clipboard, powerMonitor } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -505,6 +505,18 @@ app.whenReady().then(async () => {
   wireIpc()
   await createWindow()
   buildAppMenu()
+
+  // macOS wake-from-sleep handler. The status pollers, FS watchers, and tmux
+  // server can all end up in stale states after the system suspends — re-
+  // probe everything immediately and tell the renderer to re-sync its view.
+  const handleResume = (): void => {
+    void manager.refreshAfterResume().catch(() => undefined)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('app:resumed')
+    }
+  }
+  powerMonitor.on('resume', handleResume)
+  powerMonitor.on('unlock-screen', handleResume)
 
   if (!isDev) {
     autoUpdater.autoDownload = true
