@@ -129,14 +129,19 @@ export interface WatchTarget {
 // ~/.claude/projects/<flattened-cwd>/ holds one .jsonl per Claude session.
 // When the user opens two PikudClaude sessions on the same cwd, both have
 // the same project folder, and a naive "most recently modified" lookup makes
-// both panels show the same (newer) JSONL. Real fix: locate the actual
-// Claude process running inside this specific tmux pane and ask the kernel
-// which .jsonl it has open.
+// both panels show the same (newer) JSONL. Real fix: find the Claude process
+// running inside this specific tmux pane and read its CLAUDE_CODE_SESSION_ID
+// environment variable — Claude embeds its session UUID there, and the JSONL
+// filename is `<sessionId>.jsonl`.
 //
-// Implementation: tmux gives us the pane's shell PID. We walk descendants
-// from ps -A, then lsof each one looking for an open .jsonl under the right
-// project folder. Falls back to most-recent if anything goes wrong (Claude
-// not running, lsof missing, Windows, etc).
+// (We tried lsof first; turns out Claude doesn't keep the .jsonl file open
+// between writes, so lsof comes back empty. The env var is set for the
+// lifetime of the process, which is much more reliable.)
+
+// In-memory cache: tmuxName → last seen Claude session id. Lets us still
+// resolve the right JSONL after Claude exits or restarts mid-conversation,
+// as long as PikudClaude itself stays running.
+const sessionIdCache = new Map<string, string>()
 
 async function getPanePid(tmuxName: string): Promise<number | null> {
   try {
@@ -181,31 +186,57 @@ async function getDescendantPids(rootPid: number): Promise<number[]> {
   }
 }
 
-async function findOpenJsonlForPid(pid: number, folder: string): Promise<string | null> {
+async function readClaudeSessionId(pid: number): Promise<string | null> {
+  // BSD `ps eww -p <pid>` dumps the process command followed by its
+  // environment, space-separated. macOS only lets you read env of your own
+  // processes, which is exactly the case here.
   try {
-    const { stdout } = await execFileAsync('lsof', ['-p', String(pid), '-Fn'], {
+    const { stdout } = await execFileAsync('ps', ['eww', '-p', String(pid)], {
       timeout: 2500
     })
-    for (const line of stdout.split('\n')) {
-      if (!line.startsWith('n')) continue
-      const path = line.slice(1)
-      if (path.startsWith(folder + '/') && path.endsWith('.jsonl')) return path
+    const m = stdout.match(/CLAUDE_CODE_SESSION_ID=([0-9a-fA-F-]{36})/)
+    return m ? m[1] : null
+  } catch {
+    return null
+  }
+}
+
+function findJsonlBySessionId(sessionId: string, preferredFolder: string): string | null {
+  // Most likely location first: the project folder we already computed from
+  // cwd. If Claude was started from a different cwd than the tmux pane (rare
+  // but possible), search every folder under ~/.claude/projects/.
+  const direct = join(preferredFolder, `${sessionId}.jsonl`)
+  if (existsSync(direct)) return direct
+  try {
+    const root = join(homedir(), '.claude', 'projects')
+    for (const folder of readdirSync(root)) {
+      const p = join(root, folder, `${sessionId}.jsonl`)
+      if (existsSync(p)) return p
     }
   } catch {
-    /* lsof failed — process may have exited between ps and lsof */
+    /* projects dir missing — give up */
   }
   return null
 }
 
 async function findActiveJsonlForPane(tmuxName: string, cwd: string): Promise<string | null> {
-  const panePid = await getPanePid(tmuxName)
-  if (panePid === null) return null
-  const descendants = await getDescendantPids(panePid)
-  if (descendants.length === 0) return null
   const folder = projectDir(cwd)
-  for (const pid of descendants) {
-    const found = await findOpenJsonlForPid(pid, folder)
-    if (found) return found
+  const panePid = await getPanePid(tmuxName)
+  if (panePid !== null) {
+    const descendants = await getDescendantPids(panePid)
+    for (const pid of descendants) {
+      const sessionId = await readClaudeSessionId(pid)
+      if (!sessionId) continue
+      sessionIdCache.set(tmuxName, sessionId)
+      const path = findJsonlBySessionId(sessionId, folder)
+      if (path) return path
+    }
+  }
+  // No live Claude — try whatever session id we last saw in this pane.
+  const cached = sessionIdCache.get(tmuxName)
+  if (cached) {
+    const path = findJsonlBySessionId(cached, folder)
+    if (path) return path
   }
   return null
 }
