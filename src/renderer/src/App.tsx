@@ -919,7 +919,7 @@ export function App(): JSX.Element {
       </div>
       {showConversation && (
         <ConversationPanel
-          cwd={activeSession?.cwd ?? null}
+          sessionId={activeSession?.id ?? null}
           onClose={() => setShowConversation(false)}
         />
       )}

@@ -139,8 +139,8 @@ const api = {
     ipcRenderer.invoke('promptStats:load'),
   savePromptStats: (stats: Record<string, number[]>): Promise<void> =>
     ipcRenderer.invoke('promptStats:save', stats),
-  watchConversation: (cwd: string): Promise<void> =>
-    ipcRenderer.invoke('conversation:watch', cwd),
+  watchConversation: (sessionId: string): Promise<void> =>
+    ipcRenderer.invoke('conversation:watch', sessionId),
   unwatchConversation: (): Promise<void> => ipcRenderer.invoke('conversation:unwatch'),
   onConversationEvent: (
     handler: (

@@ -1,6 +1,10 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync, watch } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+
+const execFileAsync = promisify(execFile)
 
 export type ConvRole = 'user' | 'assistant' | 'tool_use' | 'tool_result'
 
@@ -112,8 +116,102 @@ function parseLine(raw: string): ConvMessage[] {
 
 type EventHandler = (event: ConvEvent) => void
 
+export interface WatchTarget {
+  cwd: string
+  // tmux session name — used to find which .jsonl this specific pane's
+  // Claude is writing to, so two PikudClaude sessions on the same cwd
+  // don't share the same conversation feed.
+  tmuxName?: string
+}
+
+// ---------- Per-session JSONL resolution ----------
+//
+// ~/.claude/projects/<flattened-cwd>/ holds one .jsonl per Claude session.
+// When the user opens two PikudClaude sessions on the same cwd, both have
+// the same project folder, and a naive "most recently modified" lookup makes
+// both panels show the same (newer) JSONL. Real fix: locate the actual
+// Claude process running inside this specific tmux pane and ask the kernel
+// which .jsonl it has open.
+//
+// Implementation: tmux gives us the pane's shell PID. We walk descendants
+// from ps -A, then lsof each one looking for an open .jsonl under the right
+// project folder. Falls back to most-recent if anything goes wrong (Claude
+// not running, lsof missing, Windows, etc).
+
+async function getPanePid(tmuxName: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('tmux', [
+      '-u', 'display-message', '-p', '-t', tmuxName, '#{pane_pid}'
+    ])
+    const pid = parseInt(stdout.trim(), 10)
+    return Number.isFinite(pid) ? pid : null
+  } catch {
+    return null
+  }
+}
+
+async function getDescendantPids(rootPid: number): Promise<number[]> {
+  try {
+    const { stdout } = await execFileAsync('ps', ['-A', '-o', 'pid,ppid'])
+    const childrenMap = new Map<number, number[]>()
+    const lines = stdout.trim().split('\n').slice(1)
+    for (const line of lines) {
+      const m = line.trim().split(/\s+/)
+      const pid = parseInt(m[0], 10)
+      const ppid = parseInt(m[1], 10)
+      if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue
+      const arr = childrenMap.get(ppid)
+      if (arr) arr.push(pid)
+      else childrenMap.set(ppid, [pid])
+    }
+    const result: number[] = []
+    const queue = [rootPid]
+    const seen = new Set<number>()
+    while (queue.length > 0) {
+      const pid = queue.shift()!
+      if (seen.has(pid)) continue
+      seen.add(pid)
+      if (pid !== rootPid) result.push(pid)
+      const kids = childrenMap.get(pid)
+      if (kids) queue.push(...kids)
+    }
+    return result
+  } catch {
+    return []
+  }
+}
+
+async function findOpenJsonlForPid(pid: number, folder: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('lsof', ['-p', String(pid), '-Fn'], {
+      timeout: 2500
+    })
+    for (const line of stdout.split('\n')) {
+      if (!line.startsWith('n')) continue
+      const path = line.slice(1)
+      if (path.startsWith(folder + '/') && path.endsWith('.jsonl')) return path
+    }
+  } catch {
+    /* lsof failed — process may have exited between ps and lsof */
+  }
+  return null
+}
+
+async function findActiveJsonlForPane(tmuxName: string, cwd: string): Promise<string | null> {
+  const panePid = await getPanePid(tmuxName)
+  if (panePid === null) return null
+  const descendants = await getDescendantPids(panePid)
+  if (descendants.length === 0) return null
+  const folder = projectDir(cwd)
+  for (const pid of descendants) {
+    const found = await findOpenJsonlForPid(pid, folder)
+    if (found) return found
+  }
+  return null
+}
+
 /**
- * Tail Claude's session JSONL for a given cwd and emit incremental events.
+ * Tail Claude's session JSONL for a given pane and emit incremental events.
  *
  * Tracks byte position + partial-line buffer so each append only re-reads new
  * bytes (not the whole file). Detects file rotation (Claude opens a new
@@ -121,7 +219,9 @@ type EventHandler = (event: ConvEvent) => void
  * for low-latency notifications + a 1s polling fallback because dir watchers
  * miss byte-level appends on some platforms.
  */
-export function watchConversation(cwd: string, onEvent: EventHandler): () => void {
+export function watchConversation(target: WatchTarget, onEvent: EventHandler): () => void {
+  const cwd = target.cwd
+  const tmuxName = target.tmuxName
   const dir = projectDir(cwd)
   let currentFile: string | null = null
   let position = 0
@@ -166,9 +266,24 @@ export function watchConversation(cwd: string, onEvent: EventHandler): () => voi
     return out
   }
 
-  const reconcile = (): void => {
+  const resolveFile = async (): Promise<string | null> => {
+    // Prefer the JSONL actually held open by this pane's Claude — distinguishes
+    // two sessions on the same cwd. Fall back to most-recent if no Claude is
+    // running yet, or if we're on Windows where lsof isn't available.
+    if (tmuxName && process.platform !== 'win32') {
+      try {
+        const fromPane = await findActiveJsonlForPane(tmuxName, cwd)
+        if (fromPane) return fromPane
+      } catch {
+        /* fall through to mtime lookup */
+      }
+    }
+    return latestJsonl(dir)
+  }
+
+  const reconcile = async (): Promise<void> => {
     if (stopped) return
-    const latest = latestJsonl(dir)
+    const latest = await resolveFile()
     if (!latest) {
       if (!initialSent) {
         onEvent({ type: 'initial', messages: [] })
@@ -197,17 +312,21 @@ export function watchConversation(cwd: string, onEvent: EventHandler): () => voi
     if (newMsgs.length > 0) onEvent({ type: 'append', messages: newMsgs })
   }
 
-  reconcile()
+  void reconcile()
 
   let dirWatcher: ReturnType<typeof watch> | null = null
   try {
     if (existsSync(dir)) {
-      dirWatcher = watch(dir, { persistent: false }, () => reconcile())
+      dirWatcher = watch(dir, { persistent: false }, () => {
+        void reconcile()
+      })
     }
   } catch {
     /* dir may not exist yet — polling will pick it up */
   }
-  const poll = setInterval(reconcile, 1000)
+  const poll = setInterval(() => {
+    void reconcile()
+  }, 1000)
 
   return () => {
     stopped = true

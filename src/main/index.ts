@@ -200,14 +200,20 @@ function wireIpc(): void {
 
   // Conversation panel: tail Claude's jsonl session log and stream incremental
   // events (initial backlog → append/reset). Only one watcher at a time (the
-  // currently-open panel).
+  // currently-open panel). Keyed by sessionId — not cwd — so two PikudClaude
+  // sessions on the same project don't show the same conversation.
   let convWatcher: (() => void) | null = null
-  ipcMain.handle('conversation:watch', (_e, cwd: string) => {
+  ipcMain.handle('conversation:watch', (_e, sessionId: string) => {
     convWatcher?.()
+    const meta = manager.list().find((s) => s.id === sessionId)
+    if (!meta) return
     const win = BrowserWindow.getAllWindows()[0]
-    convWatcher = watchConversation(cwd, (evt) => {
-      win?.webContents.send('conversation:event', evt)
-    })
+    convWatcher = watchConversation(
+      { cwd: meta.cwd, tmuxName: meta.tmuxName },
+      (evt) => {
+        win?.webContents.send('conversation:event', evt)
+      }
+    )
   })
   ipcMain.handle('conversation:unwatch', () => {
     convWatcher?.()

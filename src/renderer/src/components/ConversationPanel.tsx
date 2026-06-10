@@ -9,14 +9,14 @@ interface Message {
 }
 
 interface Props {
-  cwd: string | null
+  sessionId: string | null
   onClose: () => void
 }
 
 const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
 const COLLAPSE_LINES = 3
 
-export function ConversationPanel({ cwd, onClose }: Props): JSX.Element | null {
+export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | null {
   const [messages, setMessages] = useState<Message[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [syncing, setSyncing] = useState(true)
@@ -30,7 +30,7 @@ export function ConversationPanel({ cwd, onClose }: Props): JSX.Element | null {
   const lastCountRef = useRef(0)
 
   useEffect(() => {
-    if (!cwd) return
+    if (!sessionId) return
     setMessages([])
     setSyncing(true)
     setExpanded(new Set())
@@ -52,13 +52,13 @@ export function ConversationPanel({ cwd, onClose }: Props): JSX.Element | null {
         syncCompletedRef.current = true
       }
     })
-    window.api.watchConversation(cwd).catch(() => undefined)
+    window.api.watchConversation(sessionId).catch(() => undefined)
 
     return () => {
       unsub()
       window.api.unwatchConversation().catch(() => undefined)
     }
-  }, [cwd])
+  }, [sessionId])
 
   const visible = showTools
     ? messages
@@ -94,7 +94,7 @@ export function ConversationPanel({ cwd, onClose }: Props): JSX.Element | null {
     }
   }, [visible])
 
-  if (!cwd) return null
+  if (!sessionId) return null
 
   return (
     <aside className="conv-panel">
