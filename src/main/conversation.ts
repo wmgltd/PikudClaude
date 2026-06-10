@@ -1,10 +1,6 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync, watch } from 'node:fs'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-
-const execFileAsync = promisify(execFile)
 
 export type ConvRole = 'user' | 'assistant' | 'tool_use' | 'tool_result'
 
@@ -118,127 +114,94 @@ type EventHandler = (event: ConvEvent) => void
 
 export interface WatchTarget {
   cwd: string
-  // tmux session name — used to find which .jsonl this specific pane's
-  // Claude is writing to, so two PikudClaude sessions on the same cwd
-  // don't share the same conversation feed.
+  // tmux session name — kept for potential future use; current resolver
+  // doesn't depend on it.
   tmuxName?: string
+  // This session's 0-indexed position among PikudClaude sessions sharing
+  // the same cwd, ordered by createdAt ascending. Used for chronological
+  // JSONL pairing when there's more than one session on the cwd.
+  positionInCwd: number
+  siblingCount: number
 }
 
 // ---------- Per-session JSONL resolution ----------
 //
 // ~/.claude/projects/<flattened-cwd>/ holds one .jsonl per Claude session.
 // When the user opens two PikudClaude sessions on the same cwd, both have
-// the same project folder, and a naive "most recently modified" lookup makes
-// both panels show the same (newer) JSONL. Real fix: find the Claude process
-// running inside this specific tmux pane and read its CLAUDE_CODE_SESSION_ID
-// environment variable — Claude embeds its session UUID there, and the JSONL
-// filename is `<sessionId>.jsonl`.
+// the same project folder, and a naive "most recently modified" lookup
+// makes both panels show the same (newer) JSONL.
 //
-// (We tried lsof first; turns out Claude doesn't keep the .jsonl file open
-// between writes, so lsof comes back empty. The env var is set for the
-// lifetime of the process, which is much more reliable.)
+// We tried two approaches that don't work:
+//   1. lsof — Claude doesn't keep its .jsonl open between writes
+//      (open → append → close per message), so lsof returns nothing.
+//   2. CLAUDE_CODE_SESSION_ID env var — this is INHERITED from the parent
+//      shell, so every Claude process under PikudClaude inherits the same
+//      stale value (the one in the env when PikudClaude was launched).
+//      It does NOT reflect the real session id Claude is using.
+//
+// What works: chronological pairing. JSONLs are created when Claude starts.
+// If there are N PikudClaude sessions sharing this cwd (ordered by their
+// createdAt), the N most recent JSONLs (ordered by first-message timestamp)
+// are theirs — Nth session ↔ Nth JSONL. This is a heuristic but handles
+// the common case (one Claude per session, no /clear) reliably.
 
-// In-memory cache: tmuxName → last seen Claude session id. Lets us still
-// resolve the right JSONL after Claude exits or restarts mid-conversation,
-// as long as PikudClaude itself stays running.
-const sessionIdCache = new Map<string, string>()
-
-async function getPanePid(tmuxName: string): Promise<number | null> {
+function readFirstTimestamp(path: string): number | null {
+  // Read up to the first ~4KB and parse the first JSON line for its
+  // timestamp. Cheap probe — we only need this once per JSONL.
   try {
-    const { stdout } = await execFileAsync('tmux', [
-      '-u', 'display-message', '-p', '-t', tmuxName, '#{pane_pid}'
-    ])
-    const pid = parseInt(stdout.trim(), 10)
-    return Number.isFinite(pid) ? pid : null
+    const fd = openSync(path, 'r')
+    const buf = Buffer.alloc(4096)
+    const n = readSync(fd, buf, 0, 4096, 0)
+    closeSync(fd)
+    const str = buf.toString('utf8', 0, n)
+    const firstLine = str.split('\n')[0]
+    if (!firstLine.trim()) return null
+    const obj = JSON.parse(firstLine) as { timestamp?: string }
+    if (typeof obj.timestamp !== 'string') return null
+    const ts = new Date(obj.timestamp).getTime()
+    return Number.isFinite(ts) ? ts : null
   } catch {
     return null
   }
 }
 
-async function getDescendantPids(rootPid: number): Promise<number[]> {
+interface JsonlInfo {
+  path: string
+  firstTs: number
+}
+
+function listJsonlsByFirstTs(dir: string): JsonlInfo[] {
   try {
-    const { stdout } = await execFileAsync('ps', ['-A', '-o', 'pid,ppid'])
-    const childrenMap = new Map<number, number[]>()
-    const lines = stdout.trim().split('\n').slice(1)
-    for (const line of lines) {
-      const m = line.trim().split(/\s+/)
-      const pid = parseInt(m[0], 10)
-      const ppid = parseInt(m[1], 10)
-      if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue
-      const arr = childrenMap.get(ppid)
-      if (arr) arr.push(pid)
-      else childrenMap.set(ppid, [pid])
+    const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
+    const out: JsonlInfo[] = []
+    for (const f of files) {
+      const full = join(dir, f)
+      const firstTs = readFirstTimestamp(full)
+      if (firstTs !== null) out.push({ path: full, firstTs })
     }
-    const result: number[] = []
-    const queue = [rootPid]
-    const seen = new Set<number>()
-    while (queue.length > 0) {
-      const pid = queue.shift()!
-      if (seen.has(pid)) continue
-      seen.add(pid)
-      if (pid !== rootPid) result.push(pid)
-      const kids = childrenMap.get(pid)
-      if (kids) queue.push(...kids)
-    }
-    return result
+    out.sort((a, b) => a.firstTs - b.firstTs)
+    return out
   } catch {
     return []
   }
 }
 
-async function readClaudeSessionId(pid: number): Promise<string | null> {
-  // BSD `ps eww -p <pid>` dumps the process command followed by its
-  // environment, space-separated. macOS only lets you read env of your own
-  // processes, which is exactly the case here.
-  try {
-    const { stdout } = await execFileAsync('ps', ['eww', '-p', String(pid)], {
-      timeout: 2500
-    })
-    const m = stdout.match(/CLAUDE_CODE_SESSION_ID=([0-9a-fA-F-]{36})/)
-    return m ? m[1] : null
-  } catch {
-    return null
-  }
-}
-
-function findJsonlBySessionId(sessionId: string, preferredFolder: string): string | null {
-  // Most likely location first: the project folder we already computed from
-  // cwd. If Claude was started from a different cwd than the tmux pane (rare
-  // but possible), search every folder under ~/.claude/projects/.
-  const direct = join(preferredFolder, `${sessionId}.jsonl`)
-  if (existsSync(direct)) return direct
-  try {
-    const root = join(homedir(), '.claude', 'projects')
-    for (const folder of readdirSync(root)) {
-      const p = join(root, folder, `${sessionId}.jsonl`)
-      if (existsSync(p)) return p
-    }
-  } catch {
-    /* projects dir missing — give up */
-  }
-  return null
-}
-
-async function findActiveJsonlForPane(tmuxName: string, cwd: string): Promise<string | null> {
-  const folder = projectDir(cwd)
-  const panePid = await getPanePid(tmuxName)
-  if (panePid !== null) {
-    const descendants = await getDescendantPids(panePid)
-    for (const pid of descendants) {
-      const sessionId = await readClaudeSessionId(pid)
-      if (!sessionId) continue
-      sessionIdCache.set(tmuxName, sessionId)
-      const path = findJsonlBySessionId(sessionId, folder)
-      if (path) return path
-    }
-  }
-  // No live Claude — try whatever session id we last saw in this pane.
-  const cached = sessionIdCache.get(tmuxName)
-  if (cached) {
-    const path = findJsonlBySessionId(cached, folder)
-    if (path) return path
-  }
-  return null
+function pickJsonlForPosition(
+  dir: string,
+  position: number,
+  siblingCount: number
+): string | null {
+  if (siblingCount <= 1) return null
+  const all = listJsonlsByFirstTs(dir)
+  if (all.length === 0) return null
+  // Pair the N most recent JSONLs with the N siblings in creation order.
+  // If we have fewer JSONLs than siblings (sessions where Claude was never
+  // started), the earliest siblings drop off the front of the pairing.
+  const tail = all.slice(-siblingCount)
+  // position is 0-indexed in siblings sorted by createdAt ascending.
+  const offset = position - (siblingCount - tail.length)
+  if (offset < 0 || offset >= tail.length) return null
+  return tail[offset].path
 }
 
 /**
@@ -252,7 +215,6 @@ async function findActiveJsonlForPane(tmuxName: string, cwd: string): Promise<st
  */
 export function watchConversation(target: WatchTarget, onEvent: EventHandler): () => void {
   const cwd = target.cwd
-  const tmuxName = target.tmuxName
   const dir = projectDir(cwd)
   let currentFile: string | null = null
   let position = 0
@@ -297,24 +259,21 @@ export function watchConversation(target: WatchTarget, onEvent: EventHandler): (
     return out
   }
 
-  const resolveFile = async (): Promise<string | null> => {
-    // Prefer the JSONL actually held open by this pane's Claude — distinguishes
-    // two sessions on the same cwd. Fall back to most-recent if no Claude is
-    // running yet, or if we're on Windows where lsof isn't available.
-    if (tmuxName && process.platform !== 'win32') {
-      try {
-        const fromPane = await findActiveJsonlForPane(tmuxName, cwd)
-        if (fromPane) return fromPane
-      } catch {
-        /* fall through to mtime lookup */
-      }
+  const resolveFile = (): string | null => {
+    // If multiple PikudClaude sessions share this cwd, pair them with the
+    // JSONLs in the project folder by chronological position. Otherwise
+    // (this is the only session on the cwd) just take the most recent
+    // JSONL.
+    if (target.siblingCount > 1) {
+      const paired = pickJsonlForPosition(dir, target.positionInCwd, target.siblingCount)
+      if (paired) return paired
     }
     return latestJsonl(dir)
   }
 
-  const reconcile = async (): Promise<void> => {
+  const reconcile = (): void => {
     if (stopped) return
-    const latest = await resolveFile()
+    const latest = resolveFile()
     if (!latest) {
       if (!initialSent) {
         onEvent({ type: 'initial', messages: [] })
@@ -343,21 +302,17 @@ export function watchConversation(target: WatchTarget, onEvent: EventHandler): (
     if (newMsgs.length > 0) onEvent({ type: 'append', messages: newMsgs })
   }
 
-  void reconcile()
+  reconcile()
 
   let dirWatcher: ReturnType<typeof watch> | null = null
   try {
     if (existsSync(dir)) {
-      dirWatcher = watch(dir, { persistent: false }, () => {
-        void reconcile()
-      })
+      dirWatcher = watch(dir, { persistent: false }, () => reconcile())
     }
   } catch {
     /* dir may not exist yet — polling will pick it up */
   }
-  const poll = setInterval(() => {
-    void reconcile()
-  }, 1000)
+  const poll = setInterval(reconcile, 1000)
 
   return () => {
     stopped = true
