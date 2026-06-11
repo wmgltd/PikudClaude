@@ -1,6 +1,6 @@
 {
   "name": "pikudclaude",
-  "version": "0.2.8",
+  "version": "0.3.0",
   "description": "Multi-session terminal hub for Claude Code, backed by tmux",
   "main": "./out/main/index.js",
   "author": "Kobi Sela <kobi@wmg.co.il>",

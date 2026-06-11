@@ -8,13 +8,24 @@ PikudClaude is a macOS desktop app that lets you orchestrate many Claude Code se
   <img src="https://pikud.io/assets/terminal-demo.svg" alt="Animated PikudClaude demo: type in one project, switch to another, ask in Hebrew, read a Hebrew + English answer, open Settings" width="100%" />
 </p>
 
-## Latest release — v0.2.7
+## Latest release — v0.3.0
 
-[Download `PikudClaude-0.2.7-arm64.dmg`](https://github.com/wmgltd/PikudClaude/releases/tag/v0.2.7) (macOS Apple Silicon, signed + notarized) · landing page at [pikud.io](https://pikud.io).
+[Download `PikudClaude-0.3.0-arm64.dmg`](https://github.com/wmgltd/PikudClaude/releases/tag/v0.3.0) (macOS Apple Silicon, signed + notarized) · [Windows installer](https://github.com/wmgltd/PikudClaude/releases/tag/v0.3.0) · landing page at [pikud.io](https://pikud.io).
 
-**What's new — full-scrollback selection + usage strip fix**
-- **`⌘⇧C` opens a scrollback overlay** with the entire tmux history rendered as plain text — drag to select across many pages, double/triple-click, `⌘C` to copy. Works around xterm.js's viewport-only selection so you can finally grab text that scrolled past one screen.
-- **Usage strip now works in packaged builds.** macOS GUI apps get a minimal `PATH` (`/usr/bin:/bin:…`) that doesn't include `npx`, so `ccusage` never ran and the bottom-left strip always said "no active usage". The app now resolves the real interactive-login-shell `PATH` on first call and reuses it.
+**What's new — Stats view, Conversation side panel, sleep + focus fixes**
+
+- **Stats view (new sidebar tab).** Per-project breakdown of time and prompts over the last week / month / quarter / year. Includes a 7×24 heatmap of when in the week you actually work, daily prompt-count bars, and a per-project drill-down (click any column) with hourly activity profile, peak hour, first/last seen, sessions count. KPI cards show period-over-period delta (▲ / ▼ / new) versus the previous equivalent window.
+- **Conversation side panel (`⌘J` on Mac, `Ctrl+Shift+J` on Windows).** Pops out a panel showing the running session's transcript as HTML bubbles — Hebrew/Arabic flow right-to-left correctly (the terminal itself still can't do BiDi). Bubbles longer than 3 lines collapse with a show-more, each has a Copy → Copied pill, and a "tools" toggle reveals what tool calls Claude made. Click a bubble to jump-to-and-highlight the matching text in the scrollback overlay. Distinguishes per session — two PikudClaude tabs on the same project show their own conversations.
+- **Sidebar shows every session's status on launch.** Previously badges only updated for sessions you'd already clicked into. Now the status poller probes every alive session in parallel and runs an immediate one-shot probe on init, so awaiting/idle/shell badges are correct sidebar-wide the moment the app appears.
+- **Wake-from-sleep recovery.** Suspending the system used to leave the pollers paused and the terminal canvas sized to a stale layout until you clicked something. Now `powerMonitor`'s `resume` re-tests every tmux session for liveness, re-probes statuses, and tells the renderer to refresh + refit.
+- **Sidebar-click focus race fixed.** Clicking an already-active session row didn't re-focus the terminal. Now `onSelect` always dispatches a focus event and the terminal listener re-focuses through a double-RAF to win against the click's own focus-stealing.
+
+## Earlier — v0.2.7
+
+[Download `PikudClaude-0.2.7-arm64.dmg`](https://github.com/wmgltd/PikudClaude/releases/tag/v0.2.7).
+
+- **`⌘⇧C` opens a scrollback overlay** with the entire tmux history rendered as plain text — drag to select across many pages, double/triple-click, `⌘C` to copy. Works around xterm.js's viewport-only selection.
+- **Usage strip now works in packaged builds.** macOS GUI apps get a minimal `PATH` that doesn't include `npx`, so `ccusage` never ran. The app now resolves the real interactive-login-shell `PATH` on first call and reuses it.
 
 ## Earlier — v0.2.6
 
