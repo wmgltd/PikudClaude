@@ -208,22 +208,10 @@ function wireIpc(): void {
     const sessions = manager.list()
     const meta = sessions.find((s) => s.id === sessionId)
     if (!meta) return
-    // Sessions sharing this cwd, sorted by createdAt asc. The N most recent
-    // JSONLs in the project folder are paired with these in order, so the
-    // older session sees its older conversation and the newer session sees
-    // its newer one — even though they share a project directory.
-    const siblings = sessions
-      .filter((s) => s.cwd === meta.cwd)
-      .sort((a, b) => a.createdAt - b.createdAt)
-    const positionInCwd = siblings.findIndex((s) => s.id === sessionId)
+    const siblingCount = sessions.filter((s) => s.cwd === meta.cwd).length
     const win = BrowserWindow.getAllWindows()[0]
     convWatcher = watchConversation(
-      {
-        cwd: meta.cwd,
-        tmuxName: meta.tmuxName,
-        positionInCwd,
-        siblingCount: siblings.length
-      },
+      { cwd: meta.cwd, sessionId, siblingCount },
       (evt) => {
         win?.webContents.send('conversation:event', evt)
       }

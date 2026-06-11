@@ -1,6 +1,7 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync, watch } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { loadPromptHistory } from './store'
 
 export type ConvRole = 'user' | 'assistant' | 'tool_use' | 'tool_result'
 
@@ -114,13 +115,11 @@ type EventHandler = (event: ConvEvent) => void
 
 export interface WatchTarget {
   cwd: string
-  // tmux session name — kept for potential future use; current resolver
-  // doesn't depend on it.
-  tmuxName?: string
-  // This session's 0-indexed position among PikudClaude sessions sharing
-  // the same cwd, ordered by createdAt ascending. Used for chronological
-  // JSONL pairing when there's more than one session on the cwd.
-  positionInCwd: number
+  // PikudClaude session id — used to look up this session's prompt history
+  // and match it against candidate JSONLs in the project folder.
+  sessionId: string
+  // Number of PikudClaude sessions currently on this cwd. When 1, the
+  // resolver shortcuts to most-recent JSONL.
   siblingCount: number
 }
 
@@ -131,77 +130,111 @@ export interface WatchTarget {
 // the same project folder, and a naive "most recently modified" lookup
 // makes both panels show the same (newer) JSONL.
 //
-// We tried two approaches that don't work:
-//   1. lsof — Claude doesn't keep its .jsonl open between writes
-//      (open → append → close per message), so lsof returns nothing.
-//   2. CLAUDE_CODE_SESSION_ID env var — this is INHERITED from the parent
-//      shell, so every Claude process under PikudClaude inherits the same
-//      stale value (the one in the env when PikudClaude was launched).
-//      It does NOT reflect the real session id Claude is using.
+// Attempts that didn't work:
+//   1. lsof — Claude doesn't keep its .jsonl open between writes.
+//   2. CLAUDE_CODE_SESSION_ID env var — inherited from PikudClaude's parent
+//      shell, NOT updated to Claude's real session id.
+//   3. Chronological pairing of sessions ↔ JSONLs by createdAt — breaks
+//      when the folder has stale JSONLs from sessions PikudClaude no longer
+//      knows about.
 //
-// What works: chronological pairing. JSONLs are created when Claude starts.
-// If there are N PikudClaude sessions sharing this cwd (ordered by their
-// createdAt), the N most recent JSONLs (ordered by first-message timestamp)
-// are theirs — Nth session ↔ Nth JSONL. This is a heuristic but handles
-// the common case (one Claude per session, no /clear) reliably.
+// What does work: PikudClaude already records what the user typed in each
+// session (promptHistory.json). The JSONL Claude writes contains those
+// same prompts as user messages. We match: for each candidate JSONL,
+// count how many of the session's prompts appear in the file, pick the
+// JSONL with the most matches. Reliable as long as the user has typed at
+// least one prompt — and the user wouldn't open the conv panel for a
+// session that had no activity in the first place.
 
-function readFirstTimestamp(path: string): number | null {
-  // Read up to the first ~4KB and parse the first JSON line for its
-  // timestamp. Cheap probe — we only need this once per JSONL.
+function tailUserMessages(jsonlPath: string, maxBytes: number = 512 * 1024): string[] {
+  // Read up to the last `maxBytes` of the file, parse each line, return
+  // user-message text. Sufficient for prompt-matching against the user's
+  // recent prompts — they live near the end of the JSONL.
   try {
-    const fd = openSync(path, 'r')
-    const buf = Buffer.alloc(4096)
-    const n = readSync(fd, buf, 0, 4096, 0)
+    const sz = statSync(jsonlPath).size
+    const start = Math.max(0, sz - maxBytes)
+    const len = sz - start
+    const buf = Buffer.alloc(len)
+    const fd = openSync(jsonlPath, 'r')
+    readSync(fd, buf, 0, len, start)
     closeSync(fd)
-    const str = buf.toString('utf8', 0, n)
-    const firstLine = str.split('\n')[0]
-    if (!firstLine.trim()) return null
-    const obj = JSON.parse(firstLine) as { timestamp?: string }
-    if (typeof obj.timestamp !== 'string') return null
-    const ts = new Date(obj.timestamp).getTime()
-    return Number.isFinite(ts) ? ts : null
-  } catch {
-    return null
-  }
-}
-
-interface JsonlInfo {
-  path: string
-  firstTs: number
-}
-
-function listJsonlsByFirstTs(dir: string): JsonlInfo[] {
-  try {
-    const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
-    const out: JsonlInfo[] = []
-    for (const f of files) {
-      const full = join(dir, f)
-      const firstTs = readFirstTimestamp(full)
-      if (firstTs !== null) out.push({ path: full, firstTs })
+    const out: string[] = []
+    const lines = buf.toString('utf8').split('\n')
+    // Drop the first line if we sliced into the middle of one.
+    const startIdx = start > 0 ? 1 : 0
+    for (let i = startIdx; i < lines.length; i++) {
+      const line = lines[i]
+      if (!line.trim()) continue
+      let obj: Record<string, unknown>
+      try {
+        obj = JSON.parse(line) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (obj.type !== 'user') continue
+      const msg = obj.message as Record<string, unknown> | undefined
+      const content = msg?.content
+      if (typeof content === 'string') {
+        out.push(content)
+      } else if (Array.isArray(content)) {
+        for (const part of content as Array<Record<string, unknown>>) {
+          if (part.type === 'text' && typeof part.text === 'string') out.push(part.text)
+        }
+      }
     }
-    out.sort((a, b) => a.firstTs - b.firstTs)
     return out
   } catch {
     return []
   }
 }
 
-function pickJsonlForPosition(
-  dir: string,
-  position: number,
-  siblingCount: number
-): string | null {
-  if (siblingCount <= 1) return null
-  const all = listJsonlsByFirstTs(dir)
-  if (all.length === 0) return null
-  // Pair the N most recent JSONLs with the N siblings in creation order.
-  // If we have fewer JSONLs than siblings (sessions where Claude was never
-  // started), the earliest siblings drop off the front of the pairing.
-  const tail = all.slice(-siblingCount)
-  // position is 0-indexed in siblings sorted by createdAt ascending.
-  const offset = position - (siblingCount - tail.length)
-  if (offset < 0 || offset >= tail.length) return null
-  return tail[offset].path
+function scoreJsonlAgainstPrompts(jsonlPath: string, prompts: string[]): number {
+  if (prompts.length === 0) return 0
+  const msgs = tailUserMessages(jsonlPath)
+  if (msgs.length === 0) return 0
+  let score = 0
+  for (const p of prompts) {
+    const q = p.trim()
+    if (q.length < 4) continue
+    // Use a short signature (first 40 chars) so wrapping/whitespace in
+    // either side doesn't break the match.
+    const sig = q.slice(0, 40)
+    let matched = false
+    for (const m of msgs) {
+      if (m.includes(sig) || sig.includes(m.trim().slice(0, 40))) {
+        matched = true
+        break
+      }
+    }
+    if (matched) score++
+  }
+  return score
+}
+
+function pickJsonlByPromptMatch(dir: string, sessionId: string): string | null {
+  try {
+    const history = loadPromptHistory()
+    const prompts = (history[sessionId] ?? [])
+      .map((e) => e.text)
+      .filter((t) => typeof t === 'string' && t.trim().length >= 4)
+      .slice(0, 8)
+    if (prompts.length === 0) return null
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith('.jsonl'))
+      .map((f) => join(dir, f))
+    let bestPath: string | null = null
+    let bestScore = 0
+    for (const path of files) {
+      const score = scoreJsonlAgainstPrompts(path, prompts)
+      if (score > bestScore) {
+        bestScore = score
+        bestPath = path
+      }
+    }
+    return bestScore > 0 ? bestPath : null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -259,16 +292,22 @@ export function watchConversation(target: WatchTarget, onEvent: EventHandler): (
     return out
   }
 
+  // We need to pick the JSONL once on first resolve and then stick with it
+  // until the directory clearly changes (e.g., the file we picked stops
+  // existing). Re-doing the prompt-match every tick would re-scan candidate
+  // JSONLs constantly. Cache the chosen path.
+  let pickedFile: string | null = null
   const resolveFile = (): string | null => {
-    // If multiple PikudClaude sessions share this cwd, pair them with the
-    // JSONLs in the project folder by chronological position. Otherwise
-    // (this is the only session on the cwd) just take the most recent
-    // JSONL.
+    if (pickedFile && existsSync(pickedFile)) return pickedFile
     if (target.siblingCount > 1) {
-      const paired = pickJsonlForPosition(dir, target.positionInCwd, target.siblingCount)
-      if (paired) return paired
+      const matched = pickJsonlByPromptMatch(dir, target.sessionId)
+      if (matched) {
+        pickedFile = matched
+        return matched
+      }
     }
-    return latestJsonl(dir)
+    pickedFile = latestJsonl(dir)
+    return pickedFile
   }
 
   const reconcile = (): void => {
