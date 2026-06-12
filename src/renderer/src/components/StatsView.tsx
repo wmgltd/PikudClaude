@@ -164,9 +164,7 @@ export function StatsView(): JSX.Element {
 
           {heatmap && <HeatmapGrid heatmap={heatmap} />}
 
-          {summary.byDay.length > 0 && (
-            <DailyTrend byDay={summary.byDay} />
-          )}
+          <DailyTrend />
 
           {summary.projects.length === 0 && (
             <div className="stats-empty">
@@ -384,26 +382,75 @@ function Row({ day, row, max }: { day: number; row: number[]; max: number }): JS
   )
 }
 
-function DailyTrend({ byDay }: { byDay: Summary['byDay'] }): JSX.Element {
-  const max = Math.max(...byDay.map((d) => d.prompts), 1)
+type DailyRange = 7 | 14 | 21 | 30
+
+const DAILY_RANGES: DailyRange[] = [7, 14, 21, 30]
+
+function DailyTrend(): JSX.Element {
+  const [range, setRange] = useState<DailyRange>(7)
+  const [data, setData] = useState<Summary['byDay']>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    window.api
+      .getStatsSummary(range)
+      .then((s) => {
+        if (cancelled) return
+        setData(s.byDay)
+        setLoading(false)
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [range])
+
+  // Fill in every day in the window so gaps render as zero bars instead of
+  // collapsing the chart. byDay only has days with activity.
+  const filled = useMemo(() => filledDays(range, data), [range, data])
+  const max = Math.max(...filled.map((d) => d.prompts), 1)
+
   return (
     <div className="stats-section">
-      <div className="stats-section-title">Prompts per day</div>
-      <div className="stats-daily">
-        {byDay.map((d) => {
-          const h = (d.prompts / max) * 100
-          return (
-            <div
-              key={d.date}
-              className="stats-daily-col"
-              data-tip={`${d.date} — ${d.prompts.toLocaleString()} prompts, ${formatHours(d.activeMs)} active`}
+      <div className="stats-section-head">
+        <div className="stats-section-title">Prompts per day</div>
+        <div className="stats-metric-toggle" role="tablist">
+          {DAILY_RANGES.map((r) => (
+            <button
+              key={r}
+              type="button"
+              className={`stats-metric-btn ${range === r ? 'active' : ''}`}
+              onClick={() => setRange(r)}
             >
-              <div className="stats-daily-bar" style={{ height: `${Math.max(h, 2)}%` }} />
-              <div className="stats-daily-date">{d.date.slice(5)}</div>
-            </div>
-          )
-        })}
+              {r}d
+            </button>
+          ))}
+        </div>
       </div>
+      {loading ? (
+        <div className="stats-loading">loading…</div>
+      ) : (
+        <div className="stats-daily">
+          {filled.map((d) => {
+            const h = (d.prompts / max) * 100
+            return (
+              <div
+                key={d.date}
+                className="stats-daily-col"
+                data-tip={`${d.date} — ${d.prompts.toLocaleString()} prompts, ${formatHours(d.activeMs)} active`}
+              >
+                <div className="stats-daily-count">{d.prompts > 0 ? d.prompts.toLocaleString() : ''}</div>
+                <div className="stats-daily-bar" style={{ height: `${Math.max(h, d.prompts > 0 ? 2 : 0)}%` }} />
+                <div className="stats-daily-date">{d.date.slice(5)}</div>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -423,6 +470,30 @@ function formatHours(ms: number): string {
   if (h === 0) return `${m}m`
   if (m === 0) return `${h}h`
   return `${h}h ${m}m`
+}
+
+function dateKey(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function filledDays(
+  rangeDays: number,
+  byDay: Summary['byDay']
+): Summary['byDay'] {
+  const map = new Map(byDay.map((d) => [d.date, d]))
+  const out: Summary['byDay'] = []
+  const today = new Date()
+  for (let i = rangeDays - 1; i >= 0; i--) {
+    const d = new Date(today)
+    d.setDate(today.getDate() - i)
+    const key = dateKey(d)
+    const found = map.get(key)
+    out.push(found ?? { date: key, prompts: 0, activeMs: 0 })
+  }
+  return out
 }
 
 interface ProjectDetailData {
