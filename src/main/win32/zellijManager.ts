@@ -101,6 +101,9 @@ interface ZellijPane {
 
 const STATUS_WINDOW_MS = 1500
 const STATUS_BYTE_THRESHOLD = 200
+// See tmux.ts for the same constant — drop the bytes from the attach-time
+// repaint so it isn't misread as "working" the moment a session is opened.
+const ATTACH_GRACE_MS = 2500
 const AWAITING_POLL_MS = 2000
 
 const SHELL_COMMANDS = new Set([
@@ -143,6 +146,7 @@ export class ZellijManager extends EventEmitter {
   private sessions: SessionMeta[] = []
   private runtime = new Map<string, RuntimeState>()
   private attached = new Map<string, AttachedPty>()
+  private attachedAt = new Map<string, number>()
   private dataWindow = new Map<string, DataSample[]>()
   private lastEmittedStatus = new Map<string, SessionStatus>()
   private awaitingMap = new Map<string, boolean>()
@@ -445,6 +449,8 @@ export class ZellijManager extends EventEmitter {
     } else if (!this.runtime.get(id)?.paneId) {
       await this.refreshPaneId(s)
     }
+    this.attachedAt.set(id, Date.now())
+    this.dataWindow.delete(id)
     const p = pty.spawn(
       ZELLIJ_BIN(),
       ['attach', s.tmuxName],
@@ -460,6 +466,8 @@ export class ZellijManager extends EventEmitter {
     )
     p.onData((data) => {
       this.emit('data', id, data)
+      const attachedAt = this.attachedAt.get(id) ?? 0
+      if (Date.now() - attachedAt < ATTACH_GRACE_MS) return
       let win = this.dataWindow.get(id)
       if (!win) {
         win = []
@@ -469,6 +477,7 @@ export class ZellijManager extends EventEmitter {
     })
     p.onExit(() => {
       this.attached.delete(id)
+      this.attachedAt.delete(id)
       this.dataWindow.delete(id)
       this.emit('exit', id)
     })
@@ -493,6 +502,7 @@ export class ZellijManager extends EventEmitter {
     if (!a) return
     a.pty.kill()
     this.attached.delete(id)
+    this.attachedAt.delete(id)
     this.dataWindow.delete(id)
     this.awaitingMap.delete(id)
     this.paneCommandMap.delete(id)

@@ -295,7 +295,30 @@ const api = {
     const listener = (): void => handler()
     ipcRenderer.on('app:resumed', listener)
     return () => ipcRenderer.removeListener('app:resumed', listener)
-  }
+  },
+
+  getTelemetryStatus: (): Promise<{
+    enabled: boolean
+    consentShownAt: number
+    lastHeartbeatAt: number
+    anonId: string
+  }> => ipcRenderer.invoke('telemetry:get-status'),
+  setTelemetryEnabled: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke('telemetry:set-enabled', enabled),
+  markTelemetryConsentShown: (): Promise<void> =>
+    ipcRenderer.invoke('telemetry:mark-consent-shown'),
+  previewTelemetryPayload: (): Promise<unknown> =>
+    ipcRenderer.invoke('telemetry:preview-payload'),
+  resetTelemetryAnonId: (): Promise<string> => ipcRenderer.invoke('telemetry:reset-anon-id'),
+  markTelemetryFeature: (
+    feature:
+      | 'ide_jump'
+      | 'palette'
+      | 'conversation_panel'
+      | 'stats_view'
+      | 'search'
+      | 'scrollback_overlay'
+  ): Promise<void> => ipcRenderer.invoke('telemetry:mark-feature', feature)
 }
 
 contextBridge.exposeInMainWorld('api', api)

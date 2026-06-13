@@ -80,6 +80,11 @@ export interface Settings {
   ui: {
     welcomeShown: boolean
   }
+  telemetry: {
+    enabled: boolean
+    consentShownAt: number
+    lastHeartbeatAt: number
+  }
 }
 
 export interface ThemeColors {

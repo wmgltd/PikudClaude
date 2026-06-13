@@ -51,6 +51,11 @@ export interface Settings {
   ui: {
     welcomeShown: boolean
   }
+  telemetry: {
+    enabled: boolean
+    consentShownAt: number
+    lastHeartbeatAt: number
+  }
 }
 
 const DEFAULTS: Settings = {
@@ -96,6 +101,11 @@ const DEFAULTS: Settings = {
   },
   ui: {
     welcomeShown: false
+  },
+  telemetry: {
+    enabled: true,
+    consentShownAt: 0,
+    lastHeartbeatAt: 0
   }
 }
 

@@ -482,7 +482,11 @@ export function App(): JSX.Element {
       if (cur !== 'awaiting') return
       if (id === activeIdRef.current) return
 
-      setNeedsAttention((u) => new Set(u).add(id))
+      setNeedsAttention((u) => {
+        if (id === activeIdRef.current) return u
+        if (u.has(id)) return u
+        return new Set(u).add(id)
+      })
       const s = settingsRef.current
       const focused = document.hasFocus()
       const quiet =
@@ -525,7 +529,15 @@ export function App(): JSX.Element {
 
         if (!isActive) {
           if (prevStatus === 'working' && status === 'idle') {
-            setUnseen((u) => new Set(u).add(id))
+            // Re-check at execution time — between the status event being
+            // queued and now, the user may have switched to this session, in
+            // which case we'd be adding "unseen" to the session they're
+            // actively looking at.
+            setUnseen((u) => {
+              if (id === activeIdRef.current) return u
+              if (u.has(id)) return u
+              return new Set(u).add(id)
+            })
           }
           if (status === 'awaiting' && prevStatus !== 'awaiting') {
             // Update prevStatusRef synchronously so the timer callback sees
@@ -817,6 +829,23 @@ export function App(): JSX.Element {
         view={view}
         onSetView={setView}
         onSelect={(id) => {
+          // Synchronously update the ref + clear the unseen/needs-attn sets
+          // so that any status events arriving in the next few frames can't
+          // mistakenly tag this session as "unseen" while the user is
+          // literally looking at it.
+          activeIdRef.current = id
+          setUnseen((u) => {
+            if (!u.has(id)) return u
+            const next = new Set(u)
+            next.delete(id)
+            return next
+          })
+          setNeedsAttention((u) => {
+            if (!u.has(id)) return u
+            const next = new Set(u)
+            next.delete(id)
+            return next
+          })
           // Always fire a focus request — even if the session was already
           // active, the user clicking the row implies "give me back the
           // keyboard". setActiveId is a no-op in that case so the

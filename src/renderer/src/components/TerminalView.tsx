@@ -56,7 +56,7 @@ export function TerminalView({
   const searchInputRef = useRef<HTMLInputElement>(null)
   const unsubRef = useRef<(() => void) | null>(null)
   const savedScrollLineRef = useRef<number | null>(null)
-  const bidiObserverRef = useRef<MutationObserver | null>(null)
+  const bidiObserverRef = useRef<BidiObserver | null>(null)
   const preferredIDERef = useRef(preferredIDE)
   const inCopyModeRef = useRef(false)
   const scrollDepthRef = useRef(0)
@@ -87,12 +87,26 @@ export function TerminalView({
       allowProposedApi: true,
       scrollback: 10000,
       macOptionClickForcesSelection: true,
-      rightClickSelectsWord: true
+      rightClickSelectsWord: true,
+      // OSC 8 hyperlinks (Claude Code emits these for clickable URLs in its
+      // TUI). Without a linkHandler the URL underlines on hover but click is
+      // a no-op. Route activate through openExternal so it opens in the
+      // system browser. WebLinksAddon below covers raw-text URL detection.
+      linkHandler: {
+        activate: (_ev, uri) => {
+          window.api.openExternal(uri).catch(() => undefined)
+        },
+        allowNonHttpProtocols: false
+      }
     })
     const fit = new FitAddon()
     const search = new SearchAddon()
     term.loadAddon(fit)
-    term.loadAddon(new WebLinksAddon())
+    term.loadAddon(
+      new WebLinksAddon((_ev, uri) => {
+        window.api.openExternal(uri).catch(() => undefined)
+      })
+    )
     term.loadAddon(new ClipboardAddon())
     term.loadAddon(search)
     search.onDidChangeResults(({ resultIndex, resultCount }) => {
@@ -315,7 +329,12 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
     termRef.current = term
     fitRef.current = fit
     searchRef.current = search
-    bidiObserverRef.current = setupBidiObserver(host)
+    // RTL direction is now handled purely by CSS (`unicode-bidi: plaintext`
+    // on every xterm row — browser auto-picks direction from each row's
+    // first strong directional character). No JS observer, no class toggle,
+    // no reflows when content changes. The previous observer is kept in
+    // source for the drag-undo CSS rule but isn't actively run.
+    bidiObserverRef.current = null
 
 
     let cancelled = false
@@ -728,29 +747,77 @@ function quotePath(p: string): string {
 
 const HEBREW_CHAR_RE = /[֐-׿יִ-ﭏ]/
 
-function setupBidiObserver(host: HTMLElement): MutationObserver | null {
-  const tag = (row: Element): void => {
+interface BidiObserver {
+  disconnect(): void
+  forceRetagNow(): void
+}
+
+function setupBidiObserver(host: HTMLElement): BidiObserver | null {
+  // Compute the desired class for a row right now, without applying it.
+  const desiredRtl = (row: Element): boolean => {
     const text = (row as HTMLElement).innerText || row.textContent || ''
-    if (HEBREW_CHAR_RE.test(text)) row.classList.add('rtl-row')
-    else row.classList.remove('rtl-row')
+    return HEBREW_CHAR_RE.test(text)
   }
-  const tagAll = (): void => {
+
+  // Two-phase debounce: each mutation updates a "pending" desired state. We
+  // only flush pending states to actual `.rtl-row` class after the row has
+  // been STABLE for QUIET_MS. This prevents Claude Code's spinner (which
+  // flips a row's content 10+ times per second) from flicker-toggling the
+  // direction on every frame. Normal Hebrew typing is well under 5 chars
+  // per second so the lag is imperceptible to humans, but the spinner's
+  // continuous churn never gets a chance to settle and thus never flips.
+  const QUIET_MS = 250
+
+  type RowState = { desired: boolean; lastChangeTs: number }
+  const rowStates = new WeakMap<Element, RowState>()
+
+  // Asymmetric strategy: ADD `.rtl-row` immediately, REMOVE it with debounce.
+  //   • Adding Hebrew direction is always safe — if the row has Hebrew, we
+  //     should flip RTL. A spinner that briefly shows Hebrew → keeps RTL,
+  //     which matches the visible majority content. Scroll into Hebrew →
+  //     tagged on the first frame, no "wrong direction" flash.
+  //   • Removing requires QUIET_MS of stability — prevents flicker when a
+  //     row's Hebrew content transiently disappears (spinner blank frame,
+  //     scroll-induced cell churn, screen-clear repaint, etc).
+  const tickAllRows = (): void => {
     const rowsEl = host.querySelector('.xterm-rows')
     if (!rowsEl) return
+    const now = Date.now()
     rowsEl.childNodes.forEach((n) => {
-      if (n instanceof Element) tag(n)
+      if (!(n instanceof Element)) return
+      const want = desiredRtl(n)
+      const cur = n.classList.contains('rtl-row')
+      let state = rowStates.get(n)
+      if (!state) {
+        state = { desired: want, lastChangeTs: now }
+        rowStates.set(n, state)
+      }
+      if (want !== state.desired) {
+        state.desired = want
+        state.lastChangeTs = now
+      }
+      if (want && !cur) {
+        n.classList.add('rtl-row')
+      } else if (!want && cur && now - state.lastChangeTs >= QUIET_MS) {
+        n.classList.remove('rtl-row')
+      }
     })
   }
+
+  // Run on mutation (to record new pending states) AND on a steady tick (so
+  // we eventually flush after the quiet period even if no further mutations
+  // happen).
   let scheduled = false
   const schedule = (): void => {
     if (scheduled) return
     scheduled = true
     requestAnimationFrame(() => {
       scheduled = false
-      tagAll()
+      tickAllRows()
     })
   }
-  const observer = new MutationObserver(() => schedule())
+  const interval = window.setInterval(tickAllRows, 120)
+  const observer = new MutationObserver(schedule)
   const start = (): void => {
     const rowsEl = host.querySelector('.xterm-rows')
     if (!rowsEl) {
@@ -758,9 +825,17 @@ function setupBidiObserver(host: HTMLElement): MutationObserver | null {
       return
     }
     observer.observe(rowsEl, { childList: true, subtree: true, characterData: true })
-    tagAll()
+    tickAllRows()
   }
   start()
-  return observer
+  return {
+    disconnect(): void {
+      window.clearInterval(interval)
+      observer.disconnect()
+    },
+    forceRetagNow(): void {
+      tickAllRows()
+    }
+  }
 }
 

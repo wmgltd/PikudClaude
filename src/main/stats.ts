@@ -141,6 +141,14 @@ export interface Heatmap {
   rangeDays: number
 }
 
+export function readEventsForDay(dayKey: string): StatsEvent[] {
+  const [y, m, d] = dayKey.split('-').map((n) => Number(n))
+  if (!y || !m || !d) return []
+  const start = new Date(y, m - 1, d, 0, 0, 0, 0).getTime()
+  const end = start + DAY_MS
+  return readAllEvents().filter((e) => e.ts >= start && e.ts < end)
+}
+
 function readAllEvents(): StatsEvent[] {
   const path = eventsFile()
   if (!existsSync(path)) return []

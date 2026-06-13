@@ -86,6 +86,11 @@ interface DataSample {
 
 const STATUS_WINDOW_MS = 1500
 const STATUS_BYTE_THRESHOLD = 200
+// Attaching to a tmux session causes tmux + Claude's TUI to repaint the
+// whole screen, which arrives as a burst of bytes. Drop the bytes that
+// arrive in this window so they don't pollute dataWindow and get misread
+// as "working".
+const ATTACH_GRACE_MS = 2500
 const AWAITING_POLL_MS = 2000
 
 const SHELL_COMMANDS = new Set([
@@ -112,6 +117,7 @@ function detectAwaiting(content: string): boolean {
 export class TmuxManager extends EventEmitter {
   private sessions: SessionMeta[] = []
   private attached = new Map<string, AttachedPty>()
+  private attachedAt = new Map<string, number>()
   private dataWindow = new Map<string, DataSample[]>()
   private lastEmittedStatus = new Map<string, SessionStatus>()
   private awaitingMap = new Map<string, boolean>()
@@ -495,6 +501,12 @@ export class TmuxManager extends EventEmitter {
       await this.resurrect(s)
     }
     await this.ensureMouseAndClipboard(s.tmuxName)
+    // Mark the attach-start timestamp BEFORE spawning, so the grace-window
+    // check in onData sees a valid value from the very first chunk.
+    this.attachedAt.set(id, Date.now())
+    // Also clear the data window so any stale samples from a prior attach
+    // don't get blended with the new attach's bytes.
+    this.dataWindow.delete(id)
     const p = pty.spawn(
       resolveTmuxBin(),
       ['-u', 'attach-session', '-t', s.tmuxName],
@@ -512,6 +524,9 @@ export class TmuxManager extends EventEmitter {
     )
     p.onData((data) => {
       this.emit('data', id, data)
+      // Skip the attach-time repaint burst so it isn't misread as "working".
+      const attachedAt = this.attachedAt.get(id) ?? 0
+      if (Date.now() - attachedAt < ATTACH_GRACE_MS) return
       let win = this.dataWindow.get(id)
       if (!win) {
         win = []
@@ -521,6 +536,7 @@ export class TmuxManager extends EventEmitter {
     })
     p.onExit(() => {
       this.attached.delete(id)
+      this.attachedAt.delete(id)
       this.dataWindow.delete(id)
       this.emit('exit', id)
     })
@@ -545,6 +561,7 @@ export class TmuxManager extends EventEmitter {
     if (!a) return
     a.pty.kill()
     this.attached.delete(id)
+    this.attachedAt.delete(id)
     this.dataWindow.delete(id)
     this.awaitingMap.delete(id)
     this.paneCommandMap.delete(id)

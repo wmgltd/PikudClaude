@@ -813,6 +813,18 @@ input[type="text"]:focus {
 }
 
 
+/* All xterm rows use unicode-bidi: plaintext so the browser picks the
+   visual direction from each row's content (first strong character).
+   Pure Hebrew rows render RTL; pure English rows render LTR; transitions
+   between the two are atomic with the content change — no JS class
+   toggle, no "stuck in wrong direction" debounce window. */
+.terminal-host .xterm-rows > * {
+  unicode-bidi: plaintext;
+}
+
+/* Kept for compatibility with the JS bidi observer, but the explicit
+   direction:rtl is overridden by unicode-bidi: plaintext above, so the
+   class toggle is effectively a no-op for layout. */
 .terminal-host .xterm-rows .rtl-row {
   direction: rtl;
 }
@@ -821,12 +833,13 @@ input[type="text"]:focus {
   unicode-bidi: isolate;
 }
 
-/* While a drag-select is in progress, undo the RTL flip on Hebrew rows so
-   xterm's mouse-to-cell mapping (which assumes LTR) lines up with what the
-   user is dragging over. The visual order looks reversed for the duration
-   of the drag, but the selection lands on the correct logical cells, and
-   the clipboard gets the right text. */
-.terminal-host.dragging .xterm-rows .rtl-row {
+/* While a drag-select is in progress, force every row to LTR so xterm's
+   mouse-to-cell mapping (which assumes LTR) lines up with what the user
+   is dragging over. The visual order looks reversed on Hebrew rows for
+   the duration of the drag, but the selection lands on the correct
+   logical cells and the clipboard gets the right text. */
+.terminal-host.dragging .xterm-rows > * {
+  unicode-bidi: normal;
   direction: ltr;
 }
 
@@ -985,7 +998,7 @@ input[type="text"]:focus {
 }
 
 .settings-dialog {
-  width: 540px;
+  width: 620px;
   max-height: 80vh;
   display: flex;
   flex-direction: column;
@@ -993,6 +1006,11 @@ input[type="text"]:focus {
 
 .settings-dialog .dialog-tabs {
   margin-bottom: 12px;
+}
+
+.settings-dialog .dialog-tab {
+  padding: 7px 8px;
+  font-size: 12.5px;
 }
 
 .welcome-dialog {
@@ -1674,6 +1692,16 @@ input[type="text"]:focus {
 .session-row.needs-attn:hover,
 .session-row.unseen:hover {
   background: var(--bg-elev-2);
+}
+/* When a row is active, "unseen" / "needs-attn" badges shouldn't tint the
+   whole tile — the row is being viewed right now, so by definition it's not
+   unseen. The badges themselves get hidden in JSX, but defend against any
+   render-order edge cases where the class is briefly present. */
+.session-row.active.unseen,
+.session-row.active.needs-attn,
+.session-row.active.unseen:hover,
+.session-row.active.needs-attn:hover {
+  background: rgba(124, 58, 237, 0.15);
 }
 
 .add-btn.on {
@@ -2779,4 +2807,129 @@ kbd {
 }
 .stats-daily-col:hover .stats-daily-bar {
   filter: brightness(1.15);
+}
+
+/* ====== Telemetry consent dialog ====== */
+.telemetry-consent {
+  max-width: 720px;
+  text-align: center;
+}
+.telemetry-consent-icon {
+  font-size: 36px;
+  line-height: 1;
+  margin-bottom: 12px;
+}
+.telemetry-consent-lede {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0 auto 18px;
+  max-width: 520px;
+  line-height: 1.5;
+}
+.telemetry-consent-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  text-align: left;
+  margin: 14px 0 22px;
+}
+.telemetry-consent-col {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.telemetry-consent-col ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.telemetry-consent-col-head {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.telemetry-consent-col-head.ok {
+  color: #86efac;
+}
+.telemetry-consent-col-head.no {
+  color: #f87171;
+}
+.telemetry-consent-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+.telemetry-consent-no {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.telemetry-consent-no:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+}
+.telemetry-consent-yes {
+  background: linear-gradient(180deg, #8b5cf6, #6d28d9);
+  border: 1px solid #7c3aed;
+  color: white;
+  padding: 9px 22px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.35);
+}
+.telemetry-consent-yes:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+/* ====== Privacy section (Settings) ====== */
+.privacy-section .privacy-actions {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0 12px;
+  flex-wrap: wrap;
+}
+.privacy-section .privacy-anonid {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  margin-top: 6px;
+  color: var(--text-dim);
+}
+.privacy-section .privacy-anonid code {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+}
+.payload-preview-backdrop {
+  z-index: 200;
+}
+.payload-preview {
+  width: 680px;
+  max-width: 90vw;
+}
+.payload-preview-json {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 360px;
+  overflow: auto;
+  margin: 12px 0;
+  color: var(--text);
+  white-space: pre;
 }

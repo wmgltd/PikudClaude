@@ -6,7 +6,21 @@ import { TmuxManager } from './tmux'
 import { ZellijManager } from './win32/zellijManager'
 import { BookmarkStore } from './bookmarks'
 import { scanProjects } from './projects'
-import { SettingsStore, type Settings } from './settings'
+import { type Settings } from './settings'
+import { settings } from './settingsSingleton'
+import {
+  maybeSendHeartbeat,
+  startScheduler,
+  previewToday,
+  resetAnonId,
+  getAnonId,
+  recordIdeJump,
+  recordPaletteOpen,
+  recordConversationPanelOpened,
+  recordStatsViewOpened,
+  recordSearchUsed,
+  recordScrollbackOverlayUsed
+} from './telemetry'
 import { getActiveBlock } from './usage'
 import { initErrorLogging, appendErrorEntry, revealErrorLog } from './errorLog'
 import {
@@ -59,7 +73,6 @@ const manager = process.platform === 'win32'
   ? new ZellijManager()
   : new TmuxManager()
 const bookmarks = new BookmarkStore()
-const settings = new SettingsStore()
 
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
@@ -95,7 +108,9 @@ async function createWindow(): Promise<void> {
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    if (url && url !== 'about:blank' && /^https?:\/\//i.test(url)) {
+      shell.openExternal(url)
+    }
     return { action: 'deny' }
   })
 
@@ -273,6 +288,61 @@ function wireIpc(): void {
   ipcMain.handle('settings:get', () => settings.get())
   ipcMain.handle('settings:save', (_e, next: Partial<Settings>) => settings.save(next))
 
+  ipcMain.handle('telemetry:get-status', () => {
+    const s = settings.get()
+    return {
+      enabled: s.telemetry.enabled,
+      consentShownAt: s.telemetry.consentShownAt,
+      lastHeartbeatAt: s.telemetry.lastHeartbeatAt,
+      anonId: getAnonId()
+    }
+  })
+  ipcMain.handle('telemetry:set-enabled', (_e, enabled: boolean) => {
+    const s = settings.get()
+    settings.save({
+      telemetry: {
+        enabled,
+        consentShownAt: s.telemetry.consentShownAt || Date.now(),
+        lastHeartbeatAt: s.telemetry.lastHeartbeatAt
+      }
+    })
+    if (enabled) maybeSendHeartbeat().catch(() => undefined)
+  })
+  ipcMain.handle('telemetry:mark-consent-shown', () => {
+    const s = settings.get()
+    if (s.telemetry.consentShownAt === 0) {
+      settings.save({
+        telemetry: {
+          enabled: s.telemetry.enabled,
+          consentShownAt: Date.now(),
+          lastHeartbeatAt: s.telemetry.lastHeartbeatAt
+        }
+      })
+    }
+  })
+  ipcMain.handle('telemetry:preview-payload', () => previewToday())
+  ipcMain.handle('telemetry:reset-anon-id', () => resetAnonId())
+  ipcMain.handle(
+    'telemetry:mark-feature',
+    (
+      _e,
+      feature:
+        | 'ide_jump'
+        | 'palette'
+        | 'conversation_panel'
+        | 'stats_view'
+        | 'search'
+        | 'scrollback_overlay'
+    ) => {
+      if (feature === 'ide_jump') recordIdeJump()
+      else if (feature === 'palette') recordPaletteOpen()
+      else if (feature === 'conversation_panel') recordConversationPanelOpened()
+      else if (feature === 'stats_view') recordStatsViewOpened()
+      else if (feature === 'search') recordSearchUsed()
+      else if (feature === 'scrollback_overlay') recordScrollbackOverlayUsed()
+    }
+  )
+
   ipcMain.handle('usage:get-active-block', () => getActiveBlock())
 
   ipcMain.handle('git:get-branch', async (_e, cwd: string) => {
@@ -324,6 +394,7 @@ function wireIpc(): void {
   })
 
   ipcMain.handle('app:open-file', async (_e, opts: { path: string; line?: number; col?: number; cwd?: string; ide?: string }) => {
+    recordIdeJump()
     const { resolve, isAbsolute } = await import('node:path')
     const abs = isAbsolute(opts.path)
       ? opts.path
@@ -513,6 +584,7 @@ app.whenReady().then(async () => {
   wireIpc()
   await createWindow()
   buildAppMenu()
+  startScheduler()
 
   // macOS wake-from-sleep handler. The status pollers, FS watchers, and tmux
   // server can all end up in stale states after the system suspends — re-

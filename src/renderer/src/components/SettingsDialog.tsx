@@ -30,7 +30,14 @@ const FONT_OPTIONS: Array<{ label: string; value: string; note?: string }> = [
   { label: 'Inconsolata', value: 'Inconsolata, Menlo, monospace' }
 ]
 
-type SettingsTab = 'notifications' | 'sessions' | 'appearance' | 'shortcuts' | 'updates' | 'about'
+type SettingsTab =
+  | 'notifications'
+  | 'sessions'
+  | 'appearance'
+  | 'shortcuts'
+  | 'updates'
+  | 'privacy'
+  | 'about'
 
 function Hint({ text }: { text: string }): JSX.Element {
   return (
@@ -154,6 +161,13 @@ export function SettingsDialog({ initial, onSave, onCancel, onTestSound, onShowO
             onClick={() => setTab('updates')}
           >
             Updates
+          </button>
+          <button
+            className={`dialog-tab ${tab === 'privacy' ? 'active' : ''}`}
+            type="button"
+            onClick={() => setTab('privacy')}
+          >
+            Privacy
           </button>
           <button
             className={`dialog-tab ${tab === 'about' ? 'active' : ''}`}
@@ -705,6 +719,8 @@ export function SettingsDialog({ initial, onSave, onCancel, onTestSound, onShowO
           </section>
           )}
 
+          {tab === 'privacy' && <PrivacySection draft={draft} setDraft={setDraft} />}
+
           {tab === 'about' && (
           <section className="settings-section about-section">
             <h3>About PikudClaude</h3>
@@ -850,5 +866,106 @@ export function SettingsDialog({ initial, onSave, onCancel, onTestSound, onShowO
         </div>
       </div>
     </div>
+  )
+}
+
+function PrivacySection({
+  draft,
+  setDraft
+}: {
+  draft: Settings
+  setDraft: (updater: (d: Settings) => Settings) => void
+}): JSX.Element {
+  const [anonId, setAnonId] = useState<string>('')
+  const [showPreview, setShowPreview] = useState(false)
+  const [payloadJson, setPayloadJson] = useState<string>('')
+
+  useEffect(() => {
+    window.api
+      .getTelemetryStatus()
+      .then((s) => setAnonId(s.anonId))
+      .catch(() => undefined)
+  }, [])
+
+  const enabled = draft.telemetry.enabled
+
+  const toggle = async (next: boolean): Promise<void> => {
+    setDraft((d) => ({
+      ...d,
+      telemetry: {
+        ...d.telemetry,
+        enabled: next,
+        consentShownAt: d.telemetry.consentShownAt || Date.now()
+      }
+    }))
+    await window.api.setTelemetryEnabled(next).catch(() => undefined)
+  }
+
+  const reset = async (): Promise<void> => {
+    const next = await window.api.resetTelemetryAnonId().catch(() => '')
+    if (next) setAnonId(next)
+  }
+
+  const preview = async (): Promise<void> => {
+    setShowPreview(true)
+    setPayloadJson('loading…')
+    try {
+      const p = await window.api.previewTelemetryPayload()
+      setPayloadJson(p ? JSON.stringify(p, null, 2) : '(empty payload)')
+    } catch (e) {
+      setPayloadJson(`error: ${(e as Error).message ?? String(e)}`)
+    }
+  }
+
+  return (
+    <section className="settings-section privacy-section">
+      <h3>Privacy</h3>
+
+      <label className="settings-row">
+        <input type="checkbox" checked={enabled} onChange={(e) => toggle(e.target.checked)} />
+        <span className="settings-label">Share anonymous usage stats</span>
+      </label>
+      <p className="settings-hint">
+        Sends a once-a-day summary so we know which features people use. No prompts, no project
+        names, no file paths, no IP. See exactly what's sent below.
+      </p>
+
+      <div className="privacy-actions">
+        <button type="button" className="settings-test-btn" onClick={preview}>
+          See exactly what's sent →
+        </button>
+        <button type="button" className="settings-test-btn" onClick={reset}>
+          Reset anonymous ID
+        </button>
+      </div>
+
+      <div className="privacy-anonid">
+        <span className="settings-label">Anonymous ID</span>
+        <code>{anonId || '—'}</code>
+      </div>
+
+      {showPreview && (
+        <div
+          className="dialog-backdrop payload-preview-backdrop"
+          onClick={() => setShowPreview(false)}
+        >
+          <div
+            className="dialog payload-preview"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>Today's payload (preview)</h3>
+            <p className="settings-hint">
+              This is the exact JSON that would be POSTed to <code>api.pikud.io/v1/heartbeat</code>{' '}
+              at the end of the day — minus the {' '}
+              <code>day</code> field which always reflects yesterday in production.
+            </p>
+            <pre className="payload-preview-json">{payloadJson}</pre>
+            <div className="dialog-actions">
+              <button onClick={() => setShowPreview(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
   )
 }
