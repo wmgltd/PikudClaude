@@ -57,6 +57,7 @@ export function TerminalView({
   const unsubRef = useRef<(() => void) | null>(null)
   const savedScrollLineRef = useRef<number | null>(null)
   const bidiObserverRef = useRef<BidiObserver | null>(null)
+  const activeRef = useRef(active)
   const preferredIDERef = useRef(preferredIDE)
   const inCopyModeRef = useRef(false)
   const scrollDepthRef = useRef(0)
@@ -357,7 +358,7 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
     // FIRST strong character — so a mostly-Hebrew line that starts with an
     // LTR bullet/prompt/tool-name (⏺, ●, >, etc.) wrongly renders LTR. The
     // observer's asymmetric debounce keeps the spinner from flicker-toggling.
-    bidiObserverRef.current = setupBidiObserver(host)
+    bidiObserverRef.current = setupBidiObserver(host, () => activeRef.current)
 
 
     let cancelled = false
@@ -486,6 +487,14 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
       searchRef.current = null
     }
   }, [session.id])
+
+  // Keep the bidi observer's active-gate in sync, and when this terminal
+  // becomes visible again, retag its rows in one pass (they weren't tracked
+  // while it was in the background).
+  useEffect(() => {
+    activeRef.current = active
+    if (active) bidiObserverRef.current?.forceRetagNow()
+  }, [active])
 
   useEffect(() => {
     if (!active) return
@@ -776,10 +785,14 @@ interface BidiObserver {
   forceRetagNow(): void
 }
 
-function setupBidiObserver(host: HTMLElement): BidiObserver | null {
+function setupBidiObserver(host: HTMLElement, isActive: () => boolean): BidiObserver | null {
   // Compute the desired class for a row right now, without applying it.
+  // Use textContent (NOT innerText): innerText forces a synchronous reflow on
+  // every read, and this runs over every row on each tick + mutation. For
+  // detecting whether a row contains Hebrew, the raw character content is all
+  // we need, and textContent reads it without touching layout.
   const desiredRtl = (row: Element): boolean => {
-    const text = (row as HTMLElement).innerText || row.textContent || ''
+    const text = row.textContent || ''
     return HEBREW_CHAR_RE.test(text)
   }
 
@@ -804,6 +817,12 @@ function setupBidiObserver(host: HTMLElement): BidiObserver | null {
   //     row's Hebrew content transiently disappears (spinner blank frame,
   //     scroll-induced cell churn, screen-clear repaint, etc).
   const tickAllRows = (): void => {
+    // Only the visible (active) terminal needs live RTL tagging. Every visited
+    // session stays mounted (App keeps them for fast switching), so without
+    // this guard N background terminals would each retag on a 120ms timer and
+    // on every streamed mutation. Inactive ones are re-tagged in full when
+    // they become active again (forceRetagNow from the active effect).
+    if (!isActive()) return
     const rowsEl = host.querySelector('.xterm-rows')
     if (!rowsEl) return
     const now = Date.now()
@@ -833,7 +852,7 @@ function setupBidiObserver(host: HTMLElement): BidiObserver | null {
   // happen).
   let scheduled = false
   const schedule = (): void => {
-    if (scheduled) return
+    if (scheduled || !isActive()) return
     scheduled = true
     requestAnimationFrame(() => {
       scheduled = false
