@@ -103,6 +103,8 @@ const api = {
   detachSession: (id: string): Promise<void> => ipcRenderer.invoke('tmux:detach', id),
   writeSession: (id: string, data: string): Promise<void> =>
     ipcRenderer.invoke('tmux:write', id, data),
+  isInCopyMode: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('tmux:in-copy-mode', id),
   sendText: (id: string, text: string): Promise<void> =>
     ipcRenderer.invoke('tmux:send-text', id, text),
   resizeSession: (id: string, cols: number, rows: number): Promise<void> =>

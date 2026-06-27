@@ -211,6 +211,25 @@ export function TerminalView({
     })
 
     let wheelAccum = 0
+    // After a scroll burst settles, reconcile inCopyModeRef with tmux's actual
+    // pane_in_mode. With the smart-wheel binding, scrolling a plain shell
+    // enters copy-mode (auto-`q`-on-type needed) but scrolling a mouse-mode app
+    // (Claude) forwards the wheel — the pane never enters copy-mode, so a
+    // leading `q` must NOT be sent. The optimistic flip below keeps the common
+    // plain-shell case responsive for the brief window before this resolves.
+    let copyModeSyncTimer: ReturnType<typeof setTimeout> | null = null
+    const syncCopyModeFromTmux = (): void => {
+      if (copyModeSyncTimer) clearTimeout(copyModeSyncTimer)
+      copyModeSyncTimer = setTimeout(() => {
+        window.api
+          .isInCopyMode(session.id)
+          .then((on) => {
+            inCopyModeRef.current = on
+            if (!on) scrollDepthRef.current = 0
+          })
+          .catch(() => undefined)
+      }, 90)
+    }
     term.attachCustomWheelEventHandler((ev) => {
       if (dragInProgress) return false
       if (ev.deltaY === 0) return false
@@ -233,7 +252,10 @@ export function TerminalView({
         }
         wheelAccum -= dir * threshold
       }
-      if (seq) window.api.writeSession(session.id, seq)
+      if (seq) {
+        window.api.writeSession(session.id, seq)
+        syncCopyModeFromTmux()
+      }
       return false
     })
 
@@ -453,6 +475,7 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
 
     return () => {
       cancelled = true
+      if (copyModeSyncTimer) clearTimeout(copyModeSyncTimer)
       unsubRef.current?.()
       unsubRef.current = null
       bidiObserverRef.current?.disconnect()

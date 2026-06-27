@@ -144,10 +144,33 @@ export class TmuxManager extends EventEmitter {
   private async ensureGlobalBindings(): Promise<void> {
     if (this.globalBindingsApplied) return
     this.globalBindingsApplied = true
+    // Smart mouse-wheel. If the foreground app has its OWN mouse mode on
+    // (e.g. Claude Code 2.x running in its alt-screen), forward the wheel to
+    // it via `send-keys -M` so it scrolls its own view. Only fall back to
+    // tmux copy-mode for plain shells (no app mouse mode).
+    //
+    // The previous binding entered `copy-mode -e` UNCONDITIONALLY, which
+    // hijacked the wheel from such apps and dropped them into an empty
+    // copy-mode — alt-screen panes have no scrollback (history_size 0), so the
+    // pane got stuck in copy-mode at scroll position 0 and nothing scrolled.
+    // WheelDown only runs `scroll-down` when actually in copy-mode, otherwise
+    // it would print "not in a mode" in a plain shell.
     try {
       await tmux(
         'bind-key', '-T', 'root', 'WheelUpPane',
+        'if-shell', '-F', '-t', '=', '#{mouse_any_flag}',
+        'send-keys -M',
         'copy-mode -e ; send-keys -X -N 3 scroll-up'
+      )
+    } catch {
+      /* ignore */
+    }
+    try {
+      await tmux(
+        'bind-key', '-T', 'root', 'WheelDownPane',
+        'if-shell', '-F', '-t', '=', '#{mouse_any_flag}',
+        'send-keys -M',
+        "if-shell -F -t = '#{pane_in_mode}' 'send-keys -X -N 3 scroll-down'"
       )
     } catch {
       /* ignore */
@@ -176,6 +199,24 @@ export class TmuxManager extends EventEmitter {
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  /**
+   * True iff the session's pane is currently in tmux copy-mode. The renderer
+   * uses this to decide whether a typed key needs a leading `q` to exit
+   * copy-mode — but ONLY when tmux actually entered it (plain shells), never
+   * when the wheel was forwarded to a mouse-mode app (Claude), where the pane
+   * is NOT in copy-mode and a stray `q` would land in the app's input.
+   */
+  async isInCopyMode(id: string): Promise<boolean> {
+    const s = this.getSession(id)
+    if (!s) return false
+    try {
+      const out = await tmux('display-message', '-p', '-t', s.tmuxName, '#{pane_in_mode}')
+      return out.trim() === '1'
+    } catch {
+      return false
     }
   }
 

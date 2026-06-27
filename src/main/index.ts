@@ -162,6 +162,10 @@ function wireIpc(): void {
     manager.write(id, data)
   })
 
+  ipcMain.handle('tmux:in-copy-mode', (_e, id: string): Promise<boolean> =>
+    manager instanceof TmuxManager ? manager.isInCopyMode(id) : Promise.resolve(false)
+  )
+
   ipcMain.handle('tmux:send-text', async (_e, id: string, text: string) => {
     await manager.sendText(id, text)
     recordPromptSent(id, cwdOf(id), text)
