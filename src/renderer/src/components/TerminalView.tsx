@@ -329,12 +329,13 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
     termRef.current = term
     fitRef.current = fit
     searchRef.current = search
-    // RTL direction is now handled purely by CSS (`unicode-bidi: plaintext`
-    // on every xterm row — browser auto-picks direction from each row's
-    // first strong directional character). No JS observer, no class toggle,
-    // no reflows when content changes. The previous observer is kept in
-    // source for the drag-undo CSS rule but isn't actively run.
-    bidiObserverRef.current = null
+    // RTL direction: a JS observer tags any row containing Hebrew with
+    // `.rtl-row` (→ direction: rtl, English runs isolated). This beats the
+    // CSS-only `unicode-bidi: plaintext` approach, which keys off each row's
+    // FIRST strong character — so a mostly-Hebrew line that starts with an
+    // LTR bullet/prompt/tool-name (⏺, ●, >, etc.) wrongly renders LTR. The
+    // observer's asymmetric debounce keeps the spinner from flicker-toggling.
+    bidiObserverRef.current = setupBidiObserver(host)
 
 
     let cancelled = false

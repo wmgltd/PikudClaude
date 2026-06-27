@@ -813,22 +813,18 @@ input[type="text"]:focus {
 }
 
 
-/* All xterm rows use unicode-bidi: plaintext so the browser picks the
-   visual direction from each row's content (first strong character).
-   Pure Hebrew rows render RTL; pure English rows render LTR; transitions
-   between the two are atomic with the content change — no JS class
-   toggle, no "stuck in wrong direction" debounce window. */
-.terminal-host .xterm-rows > * {
-  unicode-bidi: plaintext;
-}
-
-/* Kept for compatibility with the JS bidi observer, but the explicit
-   direction:rtl is overridden by unicode-bidi: plaintext above, so the
-   class toggle is effectively a no-op for layout. */
+/* RTL is driven by the JS bidi observer (setupBidiObserver), which tags any
+   row containing Hebrew with `.rtl-row`. We deliberately do NOT use
+   `unicode-bidi: plaintext` on every row: plaintext keys the direction off
+   each row's FIRST strong character, so a mostly-Hebrew line that begins with
+   an LTR bullet/prompt/tool-name (⏺, ●, >, English word) wrongly renders LTR.
+   The observer instead flips the whole row RTL whenever Hebrew is present. */
 .terminal-host .xterm-rows .rtl-row {
   direction: rtl;
 }
 
+/* Within an RTL row, isolate each cell/run so embedded English (paths,
+   commands, numbers) keeps its own LTR order inside the RTL flow. */
 .terminal-host .xterm-rows .rtl-row > * {
   unicode-bidi: isolate;
 }
