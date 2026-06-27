@@ -44,6 +44,12 @@ import type { CreateSessionOpts, ImportSessionOpts } from './types'
 
 const isDev = !app.isPackaged
 
+// electron-updater needs app-update.yml (embedded only by published builds via
+// release.sh). Locally-packed `--dir` builds lack it, so checking for updates
+// would throw a raw ENOENT. Gate update logic on the manifest's presence.
+const updatesConfigured = (): boolean =>
+  !isDev && existsSync(join(process.resourcesPath, 'app-update.yml'))
+
 app.setName('PikudClaude')
 app.setPath('userData', join(app.getPath('appData'), 'pikudclaude'))
 
@@ -369,6 +375,12 @@ function wireIpc(): void {
 
   ipcMain.handle('updates:check-now', async () => {
     if (isDev) return { ok: false, reason: 'dev mode' }
+    // `--dir` / locally-packed builds (npm run pack) carry no app-update.yml,
+    // so electron-updater would throw a raw ENOENT. Only released builds
+    // (release.sh → --publish) embed the manifest. Report cleanly instead.
+    if (!updatesConfigured()) {
+      return { ok: false, reason: 'Update checks are only available in installed (released) builds.' }
+    }
     try {
       const r = await autoUpdater.checkForUpdates()
       return { ok: true, hasUpdate: r?.updateInfo?.version !== app.getVersion(), version: r?.updateInfo?.version ?? null }
@@ -602,7 +614,7 @@ app.whenReady().then(async () => {
   powerMonitor.on('resume', handleResume)
   powerMonitor.on('unlock-screen', handleResume)
 
-  if (!isDev) {
+  if (updatesConfigured()) {
     autoUpdater.autoDownload = true
     autoUpdater.autoInstallOnAppQuit = true
     const s = settings.get()
