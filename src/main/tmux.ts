@@ -351,21 +351,39 @@ export class TmuxManager extends EventEmitter {
     // tickStatuses can render accurate badges sidebar-wide without the user
     // needing to open each session first.
     const alive = this.sessions.filter((s) => !s.dead)
+    if (alive.length === 0) return
+    // Fetch every pane's current command in ONE subprocess (`list-panes -a`)
+    // instead of one `display-message` per session — at N sessions this drops
+    // the per-tick spawn count from 2N to N+1. Same data, just batched.
+    const cmdByName = new Map<string, string>()
+    try {
+      const { stdout } = await execFileAsync(resolveTmuxBin(), [
+        '-u', 'list-panes', '-a', '-F', '#{session_name}\t#{pane_current_command}'
+      ])
+      for (const line of stdout.split('\n')) {
+        const tab = line.indexOf('\t')
+        if (tab !== -1) cmdByName.set(line.slice(0, tab), line.slice(tab + 1).trim())
+      }
+    } catch {
+      /* list-panes failed — keep previous paneCommandMap values */
+    }
     await Promise.all(
       alive.map(async (s) => {
+        const cmd = cmdByName.get(s.tmuxName)
+        if (cmd !== undefined) this.paneCommandMap.set(s.id, cmd)
+        // "awaiting" is a Claude prompt state — a plain shell never shows one.
+        // Skip the (heavier) capture-pane for shell panes; that's where most of
+        // the per-tick subprocess cost goes when sessions sit at a shell. A
+        // session mid-transition is corrected on the next tick (2s).
+        if (cmd !== undefined && isShellCommand(cmd)) {
+          this.awaitingMap.set(s.id, false)
+          return
+        }
         try {
           const content = await this.capturePaneText(s.tmuxName, 30)
           this.awaitingMap.set(s.id, detectAwaiting(content))
         } catch {
           /* capture failed; leave previous value */
-        }
-        try {
-          const { stdout } = await execFileAsync(resolveTmuxBin(), [
-            '-u', 'display-message', '-p', '-t', s.tmuxName, '#{pane_current_command}'
-          ])
-          this.paneCommandMap.set(s.id, stdout.trim())
-        } catch {
-          /* leave previous value */
         }
       })
     )
