@@ -12,7 +12,7 @@ import type {
   ImportSessionOpts,
   SessionStatus
 } from './types'
-import { loadSessions, saveSessions } from './store'
+import { loadSessions, saveSessions, loadCachedTmuxPath, saveCachedTmuxPath } from './store'
 
 const execFileAsync = promisify(execFile)
 
@@ -38,6 +38,13 @@ function resolveTmuxBin(): string {
       return p
     }
   }
+  // A previous launch already paid the login-shell cost — reuse its answer
+  // if the binary is still there.
+  const persisted = loadCachedTmuxPath()
+  if (persisted && existsSync(persisted)) {
+    cachedTmuxBin = persisted
+    return persisted
+  }
   try {
     const out = execSync(`/bin/bash -lc 'command -v tmux'`, {
       encoding: 'utf8',
@@ -45,6 +52,7 @@ function resolveTmuxBin(): string {
     }).trim()
     if (out && existsSync(out)) {
       cachedTmuxBin = out
+      saveCachedTmuxPath(out)
       return out
     }
   } catch {
@@ -222,17 +230,22 @@ export class TmuxManager extends EventEmitter {
 
   async init(): Promise<void> {
     const stored = loadSessions()
-    for (const s of stored) {
-      s.tmuxName = s.tmuxName ?? nativeTmuxName(s.id)
-      if (await tmuxSessionExistsByName(s.tmuxName)) {
-        s.dead = false
-        this.needsRedrawOnAttach.add(s.id)
-      } else {
-        // tmux server was killed (e.g. Mac reboot) — keep the metadata so the
-        // user doesn't lose their project list. attach() will resurrect on demand.
-        s.dead = true
-      }
-    }
+    // Probe all sessions in parallel — this runs before the window is created
+    // (index.ts awaits init()), so N serial `tmux has-session` subprocesses
+    // would directly delay first paint at N sessions.
+    await Promise.all(
+      stored.map(async (s) => {
+        s.tmuxName = s.tmuxName ?? nativeTmuxName(s.id)
+        if (await tmuxSessionExistsByName(s.tmuxName)) {
+          s.dead = false
+          this.needsRedrawOnAttach.add(s.id)
+        } else {
+          // tmux server was killed (e.g. Mac reboot) — keep the metadata so the
+          // user doesn't lose their project list. attach() will resurrect on demand.
+          s.dead = true
+        }
+      })
+    )
     this.sessions = stored
     saveSessions(this.sessions)
     this.startStatusTimer()
@@ -357,8 +370,14 @@ export class TmuxManager extends EventEmitter {
     // the per-tick spawn count from 2N to N+1. Same data, just batched.
     const cmdByName = new Map<string, string>()
     try {
+      // Filter to the ACTIVE pane of the ACTIVE window: without it, a session
+      // with multiple windows/panes maps to whichever pane tmux lists LAST —
+      // e.g. a stray shell window would mask the Claude pane the user is
+      // actually looking at (wrong 'shell' status + skipped awaiting probe).
       const { stdout } = await execFileAsync(resolveTmuxBin(), [
-        '-u', 'list-panes', '-a', '-F', '#{session_name}\t#{pane_current_command}'
+        '-u', 'list-panes', '-a',
+        '-f', '#{&&:#{window_active},#{pane_active}}',
+        '-F', '#{session_name}\t#{pane_current_command}'
       ])
       for (const line of stdout.split('\n')) {
         const tab = line.indexOf('\t')

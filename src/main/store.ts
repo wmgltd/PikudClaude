@@ -18,6 +18,23 @@ export function saveSessions(sessions: SessionMeta[]): void {
   writeAtomic(STORE_FILE(), JSON.stringify(sessions, null, 2))
 }
 
+// Cache for the resolved tmux binary path. When tmux lives outside the
+// well-known locations, resolving it needs a SYNCHRONOUS login-shell spawn on
+// the main process during boot (~100-300ms) — persisting the answer makes
+// every subsequent launch hit the fast existsSync path instead.
+const TMUX_PATH_FILE = (): string => join(app.getPath('userData'), 'tmuxPath.json')
+
+export function loadCachedTmuxPath(): string | null {
+  return loadWithFallback<string>(TMUX_PATH_FILE(), (raw) => {
+    const parsed = JSON.parse(raw)
+    return typeof parsed === 'string' && parsed.length > 0 ? parsed : null
+  })
+}
+
+export function saveCachedTmuxPath(path: string): void {
+  writeAtomic(TMUX_PATH_FILE(), JSON.stringify(path))
+}
+
 const PROMPTS_FILE = (): string => join(app.getPath('userData'), 'promptHistory.json')
 
 export interface PromptEntry {
