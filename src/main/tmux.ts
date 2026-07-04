@@ -134,6 +134,7 @@ export class TmuxManager extends EventEmitter {
   private awaitingTimer: NodeJS.Timeout | null = null
   private needsRedrawOnAttach = new Set<string>()
   private resurrecting = new Map<string, Promise<void>>()
+  private attaching = new Map<string, Promise<void>>()
   private globalBindingsApplied = false
   private async ensureMouseAndClipboard(tmuxName: string): Promise<void> {
     try {
@@ -305,19 +306,28 @@ export class TmuxManager extends EventEmitter {
    * the system was suspended.
    */
   async refreshAfterResume(): Promise<void> {
-    // Re-check whether each previously-alive tmux session still exists.
-    // A long enough sleep can take the tmux server down (or macOS may have
-    // pruned it). Mark missing ones dead so the sidebar shows them
-    // correctly and so attach() resurrects them on next user click.
+    // Re-check each session against tmux truth — in BOTH directions.
+    // After wake-from-sleep, tmux server may have been killed (mark alive
+    // sessions dead), OR a session that we'd flagged dead may have come
+    // back (e.g. resurrected by Claude Code itself, or because we
+    // mis-detected it as dead earlier). Without resurrecting flipping
+    // dead→alive, the sidebar would show stale gray status icons forever.
+    let mutated = false
     for (const s of this.sessions) {
-      if (s.dead) continue
       try {
         const exists = await tmuxSessionExistsByName(s.tmuxName)
-        if (!exists) s.dead = true
+        if (exists && s.dead) {
+          s.dead = false
+          mutated = true
+        } else if (!exists && !s.dead) {
+          s.dead = true
+          mutated = true
+        }
       } catch {
-        /* ignore — treat as still alive, next tick will retry */
+        /* ignore — treat as unchanged, next tick will retry */
       }
     }
+    if (mutated) saveSessions(this.sessions)
     await this.tickAwaiting()
     this.tickStatuses()
   }
@@ -556,6 +566,16 @@ export class TmuxManager extends EventEmitter {
   async kill(id: string): Promise<void> {
     const s = this.getSession(id)
     if (!s) return
+    // If an attach/resurrect is mid-flight (user hit kill right after
+    // click-attach on a dead session), wait for it — otherwise the
+    // exists-check below runs before tmux finishes new-session, sees nothing,
+    // skips kill-session, and the completing resurrect strands an invisible
+    // orphan running the initialCommand. Draining `attaching` (which subsumes
+    // resurrect) covers the window before resurrect registers its own entry.
+    const inflightAttach = this.attaching.get(id)
+    if (inflightAttach) await inflightAttach.catch(() => undefined)
+    const inflightResurrect = this.resurrecting.get(id)
+    if (inflightResurrect) await inflightResurrect.catch(() => undefined)
     await this.detach(id)
     if (!s.imported && (await tmuxSessionExistsByName(s.tmuxName))) {
       try {
@@ -569,12 +589,38 @@ export class TmuxManager extends EventEmitter {
   }
 
   async attach(id: string, cols: number, rows: number): Promise<void> {
+    // In-flight guard (same pattern as `resurrecting`): the awaits between
+    // the attached-check and attached.set open a window where a second
+    // attach(id) — e.g. a React double-render or fast session switching —
+    // passes the check too and spawns a SECOND tmux client on the same
+    // session (this exact double-attach was observed live). Share one
+    // in-flight attach; the trailing resize matches the latest caller.
+    const inflight = this.attaching.get(id)
+    if (inflight) {
+      await inflight
+      this.resize(id, cols, rows)
+      return
+    }
+    const job = this.doAttach(id, cols, rows).finally(() => this.attaching.delete(id))
+    this.attaching.set(id, job)
+    return job
+  }
+
+  private async doAttach(id: string, cols: number, rows: number): Promise<void> {
+    const s = this.getSession(id)
+    if (!s) throw new Error(`session ${id} not found`)
+    // Anytime we successfully attach, the session is definitionally alive.
+    // Flip the persisted dead flag here too — `attach()` can short-circuit
+    // when already attached, so this is the single chokepoint that reliably
+    // catches "previously flagged dead, but actually running" sessions.
+    if (s.dead) {
+      s.dead = false
+      saveSessions(this.sessions)
+    }
     if (this.attached.has(id)) {
       this.resize(id, cols, rows)
       return
     }
-    const s = this.getSession(id)
-    if (!s) throw new Error(`session ${id} not found`)
     if (!(await tmuxSessionExistsByName(s.tmuxName))) {
       await this.resurrect(s)
     }
@@ -613,6 +659,10 @@ export class TmuxManager extends EventEmitter {
       win.push({ ts: Date.now(), size: data.length })
     })
     p.onExit(() => {
+      // Self-identify: only clear state if WE are still the registered pty.
+      // A stale pty from a superseded attach exiting later must not wipe the
+      // live attachment's bookkeeping.
+      if (this.attached.get(id)?.pty !== p) return
       this.attached.delete(id)
       this.attachedAt.delete(id)
       this.dataWindow.delete(id)
