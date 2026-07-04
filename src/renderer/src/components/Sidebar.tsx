@@ -84,6 +84,10 @@ export function Sidebar({
   useEffect(() => {
     let mounted = true
     const fetchUsage = (): void => {
+      // Skip while the window is hidden/minimized — main-side result caching
+      // makes each IPC cheap, but there's no reason to refresh a strip nobody
+      // can see. The visibilitychange listener below refreshes on return.
+      if (document.hidden) return
       window.api
         .getActiveBlock()
         .then((b) => {
@@ -92,17 +96,19 @@ export function Sidebar({
         .catch(() => undefined)
     }
     fetchUsage()
-    // Cheap-ish call (parses cached ccusage data); poll faster than the
-    // original 10min so a refreshed Claude session shows up quickly. Also
-    // refresh whenever the window regains focus — the user explicitly came
-    // back, they want fresh numbers, not a cached snapshot.
+    // The heavy ccusage spawn is cached in the main process (usage.ts), so
+    // this poll + focus refresh mostly hits the cache; poll keeps the
+    // countdown fresh, focus catches an expired cache right when the user
+    // looks at the window.
     const interval = setInterval(fetchUsage, 2 * 60 * 1000)
     const onFocus = (): void => fetchUsage()
     window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onFocus)
     return () => {
       mounted = false
       clearInterval(interval)
       window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onFocus)
     }
   }, [])
 

@@ -95,7 +95,48 @@ async function resolveUserPath(): Promise<string> {
   return cachedPath
 }
 
-export async function getActiveBlock(): Promise<ActiveUsageBlock | null> {
+// ccusage is EXPENSIVE: npx resolves the @latest dist-tag (an npm registry
+// round-trip), boots a Node process, and re-scans every JSONL under
+// ~/.claude/projects (can be GBs → several seconds of CPU+disk per run). The
+// renderer polls every 2 min AND on every window focus, so without a cache
+// this ran ~720 times a day. Serve a memoized block for CACHE_TTL_MS and
+// share one in-flight run between concurrent callers; msUntilReset is
+// recomputed from the cached endTime on every call, so the countdown in the
+// sidebar stays live for free.
+const CACHE_TTL_MS = 4 * 60 * 1000
+let cachedBlock: ActiveUsageBlock | null = null
+let cachedAt = 0
+let inFlight: Promise<ActiveUsageBlock | null> | null = null
+
+export function getActiveBlock(): Promise<ActiveUsageBlock | null> {
+  const now = Date.now()
+  // Gate on cachedAt alone (initialized to 0 so the first call fetches):
+  // a cached NULL — no active block, or a ccusage failure — must also be
+  // served for the TTL, otherwise an idle machine re-runs the full scan on
+  // every poll, which is exactly the pathology this cache exists to prevent.
+  if (now - cachedAt < CACHE_TTL_MS) {
+    return Promise.resolve(
+      cachedBlock
+        ? { ...cachedBlock, msUntilReset: Math.max(0, Date.parse(cachedBlock.endTime) - now) }
+        : null
+    )
+  }
+  if (inFlight) return inFlight
+  inFlight = fetchActiveBlock()
+    .then((block) => {
+      // Cache misses too (null) — a machine with no active block would
+      // otherwise re-run the full scan on every poll.
+      cachedBlock = block
+      cachedAt = Date.now()
+      return block
+    })
+    .finally(() => {
+      inFlight = null
+    })
+  return inFlight
+}
+
+async function fetchActiveBlock(): Promise<ActiveUsageBlock | null> {
   try {
     const PATH = await resolveUserPath()
     const { stdout } = await execFileAsync(
@@ -104,7 +145,10 @@ export async function getActiveBlock(): Promise<ActiveUsageBlock | null> {
       {
         timeout: 60_000,
         maxBuffer: 32 * 1024 * 1024,
-        env: { ...process.env, PATH }
+        // prefer-offline: npx reuses its cached resolution of the @latest
+        // dist-tag instead of hitting the npm registry on every run; the
+        // version still refreshes once npm's cache staleness window expires.
+        env: { ...process.env, PATH, npm_config_prefer_offline: 'true' }
       }
     )
     const data = JSON.parse(stdout) as { blocks?: CcusageBlock[] }
