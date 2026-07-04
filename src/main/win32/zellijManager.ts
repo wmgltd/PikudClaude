@@ -174,6 +174,36 @@ export class ZellijManager extends EventEmitter {
     this.startStatusTimer()
   }
 
+  /**
+   * Force an immediate status refresh after wake-from-sleep — the Windows
+   * counterpart of TmuxManager.refreshAfterResume. index.ts calls this from
+   * powerMonitor 'resume'/'unlock-screen' on BOTH platforms; without it the
+   * call was a TypeError on the union type (ZellijManager had no such
+   * method), crashing the resume handler on Windows.
+   */
+  async refreshAfterResume(): Promise<void> {
+    let mutated = false
+    for (const s of this.sessions) {
+      try {
+        const exists = await zellijSessionExists(s.tmuxName)
+        if (exists && s.dead) {
+          s.dead = false
+          mutated = true
+          this.needsRedrawOnAttach.add(s.id)
+          await this.refreshPaneId(s)
+        } else if (!exists && !s.dead) {
+          s.dead = true
+          mutated = true
+        }
+      } catch {
+        /* ignore — treat as unchanged, next tick will retry */
+      }
+    }
+    if (mutated) saveSessions(this.sessions)
+    await this.tickAwaiting()
+    this.tickStatuses()
+  }
+
   /** Re-query the session for its (probably one) terminal pane and cache its id. */
   private async refreshPaneId(s: SessionMeta): Promise<void> {
     try {
