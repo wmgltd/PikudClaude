@@ -71,6 +71,10 @@ if (process.platform === 'darwin' && isDev && existsSync(ICON_PATH)) {
 
 let mainWindow: BrowserWindow | null = null
 let rendererReady = false
+// Active conversation-panel watcher (fs.watch + 1s poll). Module-level so the
+// window 'closed' handler can stop it — otherwise it keeps polling a JSONL
+// forever after the window is gone (macOS keeps the app alive without windows).
+let convWatcher: (() => void) | null = null
 // On Windows, the tmux binary doesn't exist natively. ZellijManager
 // implements the same public API but drives `zellij` (a Rust-based
 // multiplexer with native Windows support) instead. Mac and Linux keep
@@ -95,7 +99,9 @@ async function createWindow(): Promise<void> {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      // The preload only uses sandbox-safe APIs (contextBridge, ipcRenderer,
+      // webUtils.getPathForFile), so the renderer can run fully sandboxed.
+      sandbox: true
     }
   })
 
@@ -104,6 +110,10 @@ async function createWindow(): Promise<void> {
   mainWindow.on('closed', () => {
     mainWindow = null
     rendererReady = false
+    // Stop the conversation watcher — nobody is listening anymore, and its
+    // 1s poll would otherwise keep running while the app sits window-less.
+    convWatcher?.()
+    convWatcher = null
   })
 
   mainWindow.webContents.on('did-start-loading', () => {
@@ -227,18 +237,20 @@ function wireIpc(): void {
   // events (initial backlog → append/reset). Only one watcher at a time (the
   // currently-open panel). Keyed by sessionId — not cwd — so two PikudClaude
   // sessions on the same project don't show the same conversation.
-  let convWatcher: (() => void) | null = null
   ipcMain.handle('conversation:watch', (_e, sessionId: string) => {
     convWatcher?.()
+    convWatcher = null
     const sessions = manager.list()
     const meta = sessions.find((s) => s.id === sessionId)
     if (!meta) return
     const siblingCount = sessions.filter((s) => s.cwd === meta.cwd).length
-    const win = BrowserWindow.getAllWindows()[0]
     convWatcher = watchConversation(
       { cwd: meta.cwd, sessionId, siblingCount },
       (evt) => {
-        win?.webContents.send('conversation:event', evt)
+        // safeSend (not a captured window ref): guards isDestroyed and
+        // rendererReady, so a watcher firing mid-close can't throw or send
+        // into a destroyed webContents.
+        safeSend('conversation:event', evt)
       }
     )
   })
