@@ -42,6 +42,13 @@ export function Dashboard({
   }, [])
 
   const [branches, setBranches] = useState<Record<string, string | null>>({})
+  // Key the git-branch fetch on the sessions' CONTENT (ids + cwds), not the
+  // array identity — App recreates the sessions array on every refresh /
+  // rename / recolor / reorder, and each of those was firing N git
+  // subprocesses for branches that couldn't have changed.
+  // Sorted → insensitive to sidebar drag-reorder, which changes array order
+  // without changing any session's identity or cwd.
+  const cwdKey = sessions.map((s) => s.id + ':' + s.cwd).sort().join('|')
   useEffect(() => {
     let cancelled = false
     const fetchAll = async (): Promise<void> => {
@@ -65,7 +72,8 @@ export function Dashboard({
     return () => {
       cancelled = true
     }
-  }, [sessions])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwdKey])
 
   const sortedSessions = useMemo(() => {
     return [...sessions].sort((a, b) => {

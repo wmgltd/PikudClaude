@@ -162,54 +162,73 @@ export function TerminalView({
     // during an active drag — otherwise tmux scrolls fresh content under
     // xterm's visual selection (which is anchored to buffer rows), and the
     // selection appears to slide with the viewport.
+    // All host listeners added in this effect are registered with this
+    // AbortController's signal and removed in one shot by the cleanup —
+    // without it they piled up across effect re-runs (StrictMode double-mount,
+    // session.id changes) and kept firing on stale closures.
+    const listenerAborter = new AbortController()
+    const hostSignal = { signal: listenerAborter.signal }
+
     let dragInProgress = false
-    host.addEventListener('mousedown', (e) => {
-      if (e.button === 0) {
-        dragInProgress = true
-        host.classList.add('dragging')
-      }
-    })
+    host.addEventListener(
+      'mousedown',
+      (e) => {
+        if (e.button === 0) {
+          dragInProgress = true
+          host.classList.add('dragging')
+        }
+      },
+      hostSignal
+    )
     const endDragTrack = (e: MouseEvent): void => {
       if (e.button === 0) {
         dragInProgress = false
         host.classList.remove('dragging')
       }
     }
-    host.addEventListener('mouseup', endDragTrack)
-    host.addEventListener('mouseleave', endDragTrack)
+    host.addEventListener('mouseup', endDragTrack, hostSignal)
+    host.addEventListener('mouseleave', endDragTrack, hostSignal)
 
     // Drag-and-drop of image files from Finder: the browser default is to
     // type the file path as text. Override so dropped images are attached
     // to Claude Code via the clipboard-paste flow (write each image to the
     // system clipboard, then send a bracketed-paste sequence so Claude
     // notices and reads the clipboard image as `[Image #N]`).
-    host.addEventListener('dragover', (e) => {
-      const items = e.dataTransfer?.items
-      if (items && Array.from(items).some((it) => it.kind === 'file')) {
-        e.preventDefault()
-      }
-    })
-    host.addEventListener('drop', async (e) => {
-      const files = Array.from(e.dataTransfer?.files ?? [])
-      if (files.length === 0) return
-      e.preventDefault()
-      e.stopPropagation()
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i]
-        if (!file.type.startsWith('image/')) continue
-        const path = window.api.getPathForFile(file)
-        if (!path) continue
-        try {
-          await window.api.attachImage(path)
-          window.api.writeSession(session.id, '\x1b[200~\x1b[201~')
-          if (i < files.length - 1) {
-            await new Promise((r) => setTimeout(r, 300))
-          }
-        } catch {
-          /* skip non-image / unreadable */
+    host.addEventListener(
+      'dragover',
+      (e) => {
+        const items = e.dataTransfer?.items
+        if (items && Array.from(items).some((it) => it.kind === 'file')) {
+          e.preventDefault()
         }
-      }
-    })
+      },
+      hostSignal
+    )
+    host.addEventListener(
+      'drop',
+      async (e) => {
+        const files = Array.from(e.dataTransfer?.files ?? [])
+        if (files.length === 0) return
+        e.preventDefault()
+        e.stopPropagation()
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i]
+          if (!file.type.startsWith('image/')) continue
+          const path = window.api.getPathForFile(file)
+          if (!path) continue
+          try {
+            await window.api.attachImage(path)
+            window.api.writeSession(session.id, '\x1b[200~\x1b[201~')
+            if (i < files.length - 1) {
+              await new Promise((r) => setTimeout(r, 300))
+            }
+          } catch {
+            /* skip non-image / unreadable */
+          }
+        }
+      },
+      hostSignal
+    )
 
     let wheelAccum = 0
     // After a scroll burst settles, reconcile inCopyModeRef with tmux's actual
@@ -346,7 +365,7 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
           }
         }
       },
-      { capture: true }
+      { capture: true, signal: listenerAborter.signal }
     )
 
     termRef.current = term
@@ -476,6 +495,7 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
 
     return () => {
       cancelled = true
+      listenerAborter.abort()
       if (copyModeSyncTimer) clearTimeout(copyModeSyncTimer)
       unsubRef.current?.()
       unsubRef.current = null
