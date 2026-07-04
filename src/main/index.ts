@@ -480,7 +480,11 @@ function wireIpc(): void {
     safeSend('tmux:status', id, status)
     updateBadgeCount()
     const cwd = cwdOf(id)
-    if (cwd && (status === 'working' || status === 'idle' || status === 'awaiting' || status === 'detached')) {
+    // Persist only 'working'/'awaiting' — the stats reader never consumes
+    // 'idle'/'detached' rows, yet they were ~half of events.jsonl (the
+    // working<->idle flap writes both edges). Skipping them halves the
+    // file's growth for free.
+    if (cwd && (status === 'working' || status === 'awaiting')) {
       recordStatusChange(id, cwd, status)
     }
   })

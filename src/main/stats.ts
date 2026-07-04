@@ -210,9 +210,24 @@ function aggregateTotals(events: StatsEvent[]): PeriodTotals {
   }
 }
 
+// Start of the query window: LOCAL MIDNIGHT (rangeDays-1) days ago, not a
+// rolling now-anchored offset. The charts render exactly the last rangeDays
+// calendar days, so a rolling window would include a slice of one extra
+// (partial) trailing day whose events land in the totals but not in any
+// rendered bar — the numbers wouldn't add up.
+function windowStart(rangeDays: number): number {
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  // setDate (not a fixed 24h*days subtraction) — calendar-correct across DST
+  // transitions, where a day is 23h/25h and a fixed offset would land the
+  // window edge at 23:00/01:00 instead of midnight.
+  start.setDate(start.getDate() - (rangeDays - 1))
+  return start.getTime()
+}
+
 export function getSummary(rangeDays: number): Summary {
   const now = Date.now()
-  const startTs = now - rangeDays * DAY_MS
+  const startTs = windowStart(rangeDays)
   const prevStartTs = startTs - rangeDays * DAY_MS
   const allEvents = readAllEvents()
   const events = allEvents.filter((e) => e.ts >= startTs && e.ts <= now)
@@ -333,7 +348,7 @@ export interface ProjectDetail {
 
 export function getProjectDetail(cwd: string, rangeDays: number): ProjectDetail | null {
   const now = Date.now()
-  const startTs = now - rangeDays * DAY_MS
+  const startTs = windowStart(rangeDays)
   const prevStartTs = startTs - rangeDays * DAY_MS
   const allEvents = readAllEvents().filter((e) => e.cwd === cwd)
   if (allEvents.length === 0) return null
@@ -407,7 +422,7 @@ export function getProjectDetail(cwd: string, rangeDays: number): ProjectDetail 
 
 export function getHeatmap(rangeDays: number): Heatmap {
   const now = Date.now()
-  const startTs = now - rangeDays * DAY_MS
+  const startTs = windowStart(rangeDays)
   const events = readAllEvents().filter((e) => e.ts >= startTs && e.ts <= now)
 
   // Per-(dayOfWeek,hour) we track the SET of unique 5-min buckets that had
