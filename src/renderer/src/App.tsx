@@ -75,6 +75,11 @@ const SIDEBAR_MIN = 180
 const SIDEBAR_MAX = 500
 const SIDEBAR_DEFAULT = 240
 const SIDEBAR_STORAGE_KEY = 'pikudclaude.sidebarWidth'
+// How many terminals stay mounted+attached at once (active + most-recent).
+// Older visited sessions are detached to stop their background pty/IPC stream;
+// tmux keeps them alive so re-selecting reattaches. Tuned for "switching among
+// a handful feels instant" without keeping all N sessions live.
+const MAX_MOUNTED = 5
 
 function loadSidebarWidth(): number {
   const v = Number(localStorage.getItem(SIDEBAR_STORAGE_KEY))
@@ -169,11 +174,16 @@ export function App(): JSX.Element {
   const prevStatusRef = useRef<Record<string, SessionStatus>>({})
   const activeIdRef = useRef<string | null>(null)
   const sessionsRef = useRef<SessionMeta[]>([])
-  // Sessions the user has actually opened in this run. We lazy-mount
-  // TerminalView so a fresh launch with 10 sessions doesn't spin up 10
-  // xterm.js instances + IPC subscriptions before the user touches them.
-  // Once a session is visited it stays mounted to keep fast switching.
-  const [visitedIds, setVisitedIds] = useState<Set<string>>(new Set())
+  // LRU of mounted terminals. We lazy-mount TerminalView so a fresh launch
+  // with 17 sessions doesn't spin up 17 xterm.js instances + pty→IPC pipelines
+  // before the user touches them — AND we cap how many stay mounted: only the
+  // active session plus the MAX_MOUNTED-1 most-recently-visited stay attached
+  // and streaming. Older ones are detached (tmux keeps them alive server-side,
+  // so re-selecting reattaches near-instantly). Without the cap, every visited
+  // session ran a live pty→IPC→xterm pipeline 24/7 behind the one visible pane.
+  // Ordered most-recent-first.
+  const [mountedIds, setMountedIds] = useState<string[]>([])
+  const prevMountedRef = useRef<string[]>([])
   // Awaiting alerts fire only after the status has been 'awaiting' for this
   // long. Prevents a duplicate notification when Claude flickers awaiting →
   // working → awaiting on a single message round-trip.
@@ -195,14 +205,25 @@ export function App(): JSX.Element {
   useEffect(() => {
     activeIdRef.current = activeId
     if (activeId) {
-      setVisitedIds((prev) => {
-        if (prev.has(activeId)) return prev
-        const next = new Set(prev)
-        next.add(activeId)
-        return next
+      // Promote the active session to the front of the LRU and cap the list.
+      setMountedIds((prev) => {
+        if (prev[0] === activeId) return prev
+        return [activeId, ...prev.filter((id) => id !== activeId)].slice(0, MAX_MOUNTED)
       })
     }
   }, [activeId])
+
+  // Detach sessions that just fell out of the mounted LRU: kills their
+  // main-process pty + tmux:data IPC (the tmux session itself stays alive, so
+  // switching back reattaches). detach is idempotent, so an already-exited id
+  // (from the exit handler pruning) is a harmless no-op.
+  useEffect(() => {
+    const prev = prevMountedRef.current
+    for (const id of prev) {
+      if (!mountedIds.includes(id)) window.api.detachSession(id).catch(() => undefined)
+    }
+    prevMountedRef.current = mountedIds
+  }, [mountedIds])
 
   useEffect(() => {
     sessionsRef.current = sessions
@@ -452,12 +473,7 @@ export function App(): JSX.Element {
     return window.api.onSessionExit((id) => {
       setSessions((prev) => prev.filter((s) => s.id !== id))
       setActiveId((prev) => (prev === id ? null : prev))
-      setVisitedIds((prev) => {
-        if (!prev.has(id)) return prev
-        const next = new Set(prev)
-        next.delete(id)
-        return next
-      })
+      setMountedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev))
       setPromptHistory((prev) => {
         if (!(id in prev)) return prev
         const next = { ...prev }
@@ -727,6 +743,10 @@ export function App(): JSX.Element {
     await window.api.killSession(id)
     setSessions((prev) => prev.filter((s) => s.id !== id))
     setActiveId((prev) => (prev === id ? null : prev))
+    // Free the LRU slot immediately: kill() detaches internally, so no
+    // onSessionExit fires (the self-identifying onExit guard suppresses it),
+    // and the dead id would otherwise linger in mountedIds.
+    setMountedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev))
     setPromptHistory((prev) => {
       if (!(id in prev)) return prev
       const next = { ...prev }
@@ -900,11 +920,11 @@ export function App(): JSX.Element {
           </div>
         )}
         {sessions
-          // Only mount terminals the user has actually visited. Active id is
-          // always mounted (visitedIds is populated synchronously in the
-          // activeId effect, but include it here as a belt-and-suspenders so
-          // the first render after a switch never shows an empty pane).
-          .filter((s) => s.id === activeId || visitedIds.has(s.id))
+          // Only mount terminals in the LRU (active + most-recent). Active id
+          // is included directly as a belt-and-suspenders: the activeId effect
+          // adds it to mountedIds, but this render runs before that effect, so
+          // the first frame after a switch never shows an empty pane.
+          .filter((s) => s.id === activeId || mountedIds.includes(s.id))
           .map((s) => (
             <TerminalView
               key={s.id}

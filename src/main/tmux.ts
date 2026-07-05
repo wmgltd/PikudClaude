@@ -586,6 +586,12 @@ export class TmuxManager extends EventEmitter {
     }
     this.sessions = this.sessions.filter((x) => x.id !== id)
     saveSessions(this.sessions)
+    // detach() deliberately keeps these session-scoped maps for LRU eviction;
+    // here the session is truly gone, so clear them (tickAwaiting no longer
+    // iterates it, so they'd otherwise linger). lastEmittedStatus is left for
+    // tickStatuses to flush as a 'detached' broadcast, then drop.
+    this.awaitingMap.delete(id)
+    this.paneCommandMap.delete(id)
   }
 
   async attach(id: string, cols: number, rows: number): Promise<void> {
@@ -598,6 +604,11 @@ export class TmuxManager extends EventEmitter {
     const inflight = this.attaching.get(id)
     if (inflight) {
       await inflight
+      // If a concurrent detach (LRU eviction) won the race and tore the
+      // attachment down while we were piggybacking, re-attach fresh instead of
+      // resizing a dead entry — otherwise a rapid evict-then-reselect of the
+      // same session could leave it detached-but-mounted (a blank pane).
+      if (!this.attached.has(id)) return this.attach(id, cols, rows)
       this.resize(id, cols, rows)
       return
     }
@@ -685,14 +696,33 @@ export class TmuxManager extends EventEmitter {
   }
 
   async detach(id: string): Promise<void> {
+    // Drain an in-flight attach first (same reason as kill()): doAttach sets
+    // `attached` only at its END, after several awaits. Without this, detach()
+    // called during that window (e.g. a background session evicted from the
+    // LRU while still attaching) would find nothing, no-op, and then the
+    // completing attach spawns a pty that streams forever with no consumer —
+    // the exact zombie this detach is meant to prevent.
+    const inflight = this.attaching.get(id)
+    if (inflight) await inflight.catch(() => undefined)
     const a = this.attached.get(id)
     if (!a) return
-    a.pty.kill()
+    // Delete BEFORE kill so the pty.onExit self-identify guard
+    // (attached.get(id)?.pty !== p) is order-independent — the killed pty's
+    // late exit sees it's no longer registered and stays quiet. Wrap so map
+    // cleanup always runs even if kill() throws.
     this.attached.delete(id)
     this.attachedAt.delete(id)
     this.dataWindow.delete(id)
-    this.awaitingMap.delete(id)
-    this.paneCommandMap.delete(id)
+    try {
+      a.pty.kill()
+    } catch {
+      /* pty already dead */
+    }
+    // NOTE: intentionally keep awaitingMap/paneCommandMap. They are
+    // session-scoped (not attachment-scoped) and tickAwaiting refreshes them
+    // for every alive session — so a detached-but-alive session (LRU eviction)
+    // keeps accurate shell/idle/awaiting badges. kill() clears them since the
+    // session is actually gone.
   }
 
   write(id: string, data: string): void {

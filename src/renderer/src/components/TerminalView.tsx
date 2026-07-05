@@ -392,6 +392,17 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
       const dims = fit.proposeDimensions() ?? { cols: 100, rows: 30 }
       await window.api.attachSession(session.id, dims.cols, dims.rows)
       if (cancelled) return
+      // Reconcile copy-mode once on (re)attach: the pane's tmux copy-mode
+      // survives a client detach, so a session evicted from the LRU while
+      // scrolled up can remount with the pane still in copy-mode — without
+      // this, inCopyModeRef would be a stale false and the first keystroke
+      // wouldn't send the leading `q` to exit it.
+      window.api
+        .isInCopyMode(session.id)
+        .then((on) => {
+          if (!cancelled) inCopyModeRef.current = on
+        })
+        .catch(() => undefined)
       unsubRef.current = window.api.onSessionData((id, data) => {
         // Strip mouse-tracking DECSETs (1000/1002/1006 etc.) so xterm stays
         // out of mouse mode. That way drag = xterm-native text selection
