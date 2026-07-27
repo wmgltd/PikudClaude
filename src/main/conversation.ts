@@ -1,5 +1,5 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync, watch } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { loadPromptHistory } from './store'
 
@@ -235,6 +235,33 @@ function pickJsonlByPromptMatch(dir: string, sessionId: string): string | null {
   } catch {
     return null
   }
+}
+
+function soleJsonl(dir: string): string | null {
+  try {
+    const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
+    return files.length === 1 ? join(dir, files[0]) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve the Claude Code session id (the .jsonl basename) that a PikudClaude
+ * session was running in `cwd` — used to rebuild `claude --resume <id>` when a
+ * session is resurrected after its tmux server died (e.g. a Mac reboot).
+ *
+ * Primary signal is the same prompt-match the conversation panel uses, so it
+ * stays correct even when several PikudClaude sessions share one cwd. Falls
+ * back to the sole JSONL only when the folder is unambiguous. Returns null when
+ * it can't confidently pick one — callers should then start a fresh session
+ * rather than resume the wrong conversation.
+ */
+export function resolveClaudeSessionId(cwd: string, sessionId: string): string | null {
+  const dir = projectDir(cwd)
+  const chosen = pickJsonlByPromptMatch(dir, sessionId) ?? soleJsonl(dir)
+  if (!chosen) return null
+  return basename(chosen).replace(/\.jsonl$/, '')
 }
 
 /**

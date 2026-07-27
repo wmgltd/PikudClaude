@@ -13,6 +13,7 @@ import type {
   SessionStatus
 } from './types'
 import { loadSessions, saveSessions, loadCachedTmuxPath, saveCachedTmuxPath } from './store'
+import { resolveClaudeSessionId } from './conversation'
 
 const execFileAsync = promisify(execFile)
 
@@ -286,12 +287,29 @@ export class TmuxManager extends EventEmitter {
       '-x', '200',
       '-y', '50'
     )
-    if (s.initialCommand) {
-      await tmux('send-keys', '-t', s.tmuxName, s.initialCommand, 'Enter')
+    const startCommand = this.resurrectCommandFor(s)
+    if (startCommand) {
+      await tmux('send-keys', '-t', s.tmuxName, startCommand, 'Enter')
     }
     s.dead = false
     this.needsRedrawOnAttach.add(s.id)
     saveSessions(this.sessions)
+  }
+
+  // A session is only ever resurrected because its tmux server died out from
+  // under it (e.g. a Mac reboot). Re-running the raw `claude` initialCommand
+  // would drop the user into an empty conversation; rewrite it to
+  // `claude --resume <id>` so the pre-reboot conversation comes back. Only
+  // touches Claude commands, preserves any extra flags, and no-ops back to the
+  // original command when we can't confidently resolve the session's JSONL.
+  private resurrectCommandFor(s: SessionMeta): string | undefined {
+    const cmd = s.initialCommand
+    if (!cmd || !s.cwd) return cmd
+    if (!/^\s*claude(\s|$)/.test(cmd)) return cmd
+    if (/(^|\s)(--resume|-r|--continue|-c)(\s|$)/.test(cmd)) return cmd
+    const id = resolveClaudeSessionId(s.cwd, s.id)
+    if (!id) return cmd
+    return cmd.replace(/^(\s*claude)(?=\s|$)/, `$1 --resume ${id}`)
   }
 
   private startStatusTimer(): void {
