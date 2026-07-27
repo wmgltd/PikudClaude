@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, Notification, Menu, clipboard, powerMonitor } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, nativeImage, Notification, Menu, clipboard, powerMonitor, powerSaveBlocker } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
@@ -487,10 +487,12 @@ function wireIpc(): void {
     const cwd = cwdOf(id)
     safeSend('tmux:exit', id)
     if (cwd) recordSessionClosed(id, cwd)
+    updatePowerBlocker()
   })
   manager.on('status', (id: string, status: string) => {
     safeSend('tmux:status', id, status)
     updateBadgeCount()
+    updatePowerBlocker()
     const cwd = cwdOf(id)
     // Persist only 'working'/'awaiting' — the stats reader never consumes
     // 'idle'/'detached' rows, yet they were ~half of events.jsonl (the
@@ -510,6 +512,26 @@ function updateBadgeCount(): void {
     app.setBadgeCount(count)
   } catch {
     /* ignore */
+  }
+}
+
+// Keep the Mac awake while any session is actively working, so a long unattended
+// Claude run isn't killed by the system going to sleep — sleep tears down the
+// tmux server and the live session with it (the exact loss that started this).
+// 'prevent-app-suspension' keeps the system awake but lets the DISPLAY sleep, so
+// it doesn't burn battery lighting the screen. The blocker is released the moment
+// no session is working. Caveat: like `caffeinate`, it can't stop a manual Shut
+// Down, power loss, or clamshell-on-battery sleep — those are outside app control.
+let powerBlockerId: number | null = null
+function updatePowerBlocker(): void {
+  const anyWorking = Object.values(manager.getStatuses()).some((s) => s === 'working')
+  if (anyWorking) {
+    if (powerBlockerId === null || !powerSaveBlocker.isStarted(powerBlockerId)) {
+      powerBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    }
+  } else if (powerBlockerId !== null) {
+    if (powerSaveBlocker.isStarted(powerBlockerId)) powerSaveBlocker.stop(powerBlockerId)
+    powerBlockerId = null
   }
 }
 
