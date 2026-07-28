@@ -40,6 +40,10 @@ interface Props {
   defaultCwd?: string
   defaultColor?: string
   recentMax?: number
+  // Existing sessions, to warn (not block) when a second session is opened on
+  // a folder that already has one — the same-cwd case that confuses the
+  // conversation panel's per-session JSONL resolution.
+  existingSessions?: { name: string; cwd: string }[]
 }
 
 export function NewSessionDialog({
@@ -49,7 +53,8 @@ export function NewSessionDialog({
   defaultInitialCommand = 'claude',
   defaultCwd = '',
   defaultColor,
-  recentMax = RECENT_MAX
+  recentMax = RECENT_MAX,
+  existingSessions = []
 }: Props): JSX.Element {
   const [name, setName] = useState('')
   const [cwd, setCwd] = useState(defaultCwd)
@@ -97,6 +102,11 @@ export function NewSessionDialog({
 
   const recentPaths = new Set(recents.map((r) => r.path))
   const recentList = recents.filter((r) => !filter.trim() || r.name.toLowerCase().includes(filter.toLowerCase()))
+
+  const trimmedCwd = normCwd(cwd)
+  const dupSession = trimmedCwd
+    ? existingSessions.find((s) => normCwd(s.cwd) === trimmedCwd)
+    : undefined
 
   return (
     <div className="dialog-backdrop" onClick={onCancel}>
@@ -174,6 +184,25 @@ export function NewSessionDialog({
             />
             <button onClick={pickDir} type="button">Browse</button>
           </div>
+          {dupSession && (
+            <div
+              style={{
+                marginTop: 8,
+                fontSize: 12,
+                lineHeight: 1.4,
+                color: '#fcd34d',
+                display: 'flex',
+                gap: 6,
+                alignItems: 'flex-start'
+              }}
+            >
+              <span aria-hidden>⚠️</span>
+              <span>
+                You already have a session “{dupSession.name}” on this folder. Two sessions on the
+                same project can confuse the conversation panel — open another only if you mean to.
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="field">
@@ -203,12 +232,18 @@ export function NewSessionDialog({
         <div className="dialog-actions">
           <button onClick={onCancel} disabled={busy}>Cancel</button>
           <button className="primary" onClick={submit} disabled={busy || !name.trim() || !cwd.trim()}>
-            {busy ? 'Creating…' : 'Create'}
+            {busy ? 'Creating…' : dupSession ? 'Open anyway' : 'Create'}
           </button>
         </div>
       </div>
     </div>
   )
+}
+
+// Normalize a cwd for equality: trim + drop trailing slashes so
+// "/a/b", "/a/b/", and " /a/b " all compare equal.
+function normCwd(p: string): string {
+  return (p || '').trim().replace(/\/+$/, '')
 }
 
 function shortPath(p: string): string {

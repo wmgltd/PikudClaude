@@ -991,6 +991,7 @@ export function App(): JSX.Element {
           defaultCwd={settings.sessions.defaultCwd}
           defaultColor={settings.sessions.defaultColor}
           recentMax={settings.sessions.recentProjectsMax}
+          existingSessions={sessions.map((s) => ({ name: s.name, cwd: s.cwd }))}
         />
       )}
       {showSettings && (

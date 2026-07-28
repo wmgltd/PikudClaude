@@ -5,6 +5,11 @@ import { IS_MAC } from '../utils/platform'
 
 const SESSION_COLORS = ['#7c3aed', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#ef4444', '#8b5cf6', '#14b8a6']
 
+// Grace after a session stops 'working' before its project's run-lock releases —
+// absorbs the working↔idle flicker within a single turn so the disabled sibling
+// row doesn't strobe. Released for real once the run stays finished this long.
+const LOCK_GRACE_MS = 3000
+
 const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
 
 function isRtl(text: string): boolean {
@@ -63,6 +68,14 @@ export function Sidebar({
     (n, s) => (statuses[s.id] === 'awaiting' ? n + 1 : n),
     0
   )
+  // How many sessions share each folder — drives the "⧉ ×N" badge that flags
+  // duplicate-cwd sessions (the same-project case that confuses the
+  // conversation panel's per-session JSONL resolution).
+  const cwdCounts = new Map<string, number>()
+  for (const s of sessions) {
+    const k = normCwd(s.cwd)
+    if (k) cwdCounts.set(k, (cwdCounts.get(k) ?? 0) + 1)
+  }
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [colorPickerId, setColorPickerId] = useState<string | null>(null)
@@ -80,6 +93,15 @@ export function Sidebar({
     projectedTokens: number | null
   } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // Per-project run lock: while a session on a cwd is 'working', the OTHER
+  // sessions on that cwd are disabled. `lockedBy` maps cwd → the id of the
+  // session holding the lock; a sibling is disabled iff another id holds its
+  // cwd's lock. Released a grace period after the holder's run finishes.
+  const [lockedBy, setLockedBy] = useState<Map<string, string>>(new Map())
+  const lockedByRef = useRef(lockedBy)
+  lockedByRef.current = lockedBy
+  const releaseTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   useEffect(() => {
     let mounted = true
@@ -125,6 +147,54 @@ export function Sidebar({
     document.addEventListener('click', close)
     return () => document.removeEventListener('click', close)
   }, [colorPickerId])
+
+  // Maintain the per-project run lock from live statuses. Acquire/refresh
+  // immediately when a session is 'working'; schedule release once its cwd has
+  // no working session, after LOCK_GRACE_MS (cancelled if working resumes).
+  useEffect(() => {
+    const working = new Map<string, string>() // cwd -> working session id
+    for (const s of sessions) {
+      if (statuses[s.id] === 'working') {
+        const k = normCwd(s.cwd)
+        if (k) working.set(k, s.id)
+      }
+    }
+    const next = new Map(lockedByRef.current)
+    let changed = false
+    for (const [k, id] of working) {
+      if (next.get(k) !== id) {
+        next.set(k, id)
+        changed = true
+      }
+      const pending = releaseTimers.current.get(k)
+      if (pending) {
+        clearTimeout(pending)
+        releaseTimers.current.delete(k)
+      }
+    }
+    for (const k of next.keys()) {
+      if (!working.has(k) && !releaseTimers.current.has(k)) {
+        const timer = setTimeout(() => {
+          releaseTimers.current.delete(k)
+          setLockedBy((prev) => {
+            const n = new Map(prev)
+            n.delete(k)
+            return n
+          })
+        }, LOCK_GRACE_MS)
+        releaseTimers.current.set(k, timer)
+      }
+    }
+    if (changed) setLockedBy(next)
+  }, [statuses, sessions])
+
+  useEffect(() => {
+    const timers = releaseTimers.current
+    return () => {
+      for (const t of timers.values()) clearTimeout(t)
+      timers.clear()
+    }
+  }, [])
 
   const startEdit = (s: SessionMeta): void => {
     setEditingId(s.id)
@@ -243,6 +313,9 @@ export function Sidebar({
         {sessions.map((s, i) => {
           const status = statuses[s.id] ?? 'detached'
           const isEditing = editingId === s.id
+          const sharedCount = cwdCounts.get(normCwd(s.cwd)) ?? 1
+          const lockHolder = lockedBy.get(normCwd(s.cwd))
+          const isLockedOut = !!lockHolder && lockHolder !== s.id
           const isUnseen = unseen.has(s.id)
           const needsAttn = needsAttention.has(s.id)
           const isDragging = draggingId === s.id
@@ -250,7 +323,7 @@ export function Sidebar({
           return (
             <div
               key={s.id}
-              draggable={!isEditing}
+              draggable={!isEditing && !isLockedOut}
               onDragStart={(e) => handleDragStart(e, s.id)}
               onDragOver={(e) => handleDragOver(e, s.id)}
               onDrop={(e) => handleDrop(e, s.id)}
@@ -261,8 +334,12 @@ export function Sidebar({
                   setDropPosition(null)
                 }
               }}
-              className={`session-row ${activeId === s.id ? 'active' : ''} ${needsAttn ? 'needs-attn' : ''} ${isUnseen ? 'unseen' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget && dropPosition ? `drop-${dropPosition}` : ''}`}
-              onClick={() => !isEditing && onSelect(s.id)}
+              className={`session-row ${activeId === s.id ? 'active' : ''} ${needsAttn ? 'needs-attn' : ''} ${isUnseen ? 'unseen' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget && dropPosition ? `drop-${dropPosition}` : ''} ${isLockedOut ? 'locked-out' : ''}`}
+              style={isLockedOut ? { opacity: 0.4, cursor: 'not-allowed' } : undefined}
+              onClick={() => {
+                if (isEditing || isLockedOut) return
+                onSelect(s.id)
+              }}
             >
               <div
                 className={`session-dot ${status === 'shell' || status === 'detached' ? 'inactive' : ''}`}
@@ -323,6 +400,22 @@ export function Sidebar({
                   )}
                   {s.imported && !isEditing && (
                     <span className="imported-badge" title={`imported from tmux: ${s.tmuxName}`}>↥</span>
+                  )}
+                  {sharedCount > 1 && !isEditing && (
+                    <span
+                      title={`${sharedCount} sessions share this folder — may confuse the conversation panel`}
+                      style={{ fontSize: 10, opacity: 0.55, marginInlineStart: 4, cursor: 'default' }}
+                    >
+                      ⧉×{sharedCount}
+                    </span>
+                  )}
+                  {isLockedOut && !isEditing && (
+                    <span
+                      title="another session on this project is running — unlocks when it finishes"
+                      style={{ fontSize: 10, marginInlineStart: 4, cursor: 'not-allowed' }}
+                    >
+                      🔒
+                    </span>
                   )}
                 </div>
                 <div className="session-cwd">{basename(s.cwd) || s.tmuxName}</div>
@@ -419,6 +512,10 @@ export function Sidebar({
       </div>
     </aside>
   )
+}
+
+function normCwd(p: string): string {
+  return (p || '').trim().replace(/\/+$/, '')
 }
 
 function formatTokens(n: number): string {
