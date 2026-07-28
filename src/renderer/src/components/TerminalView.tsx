@@ -579,6 +579,15 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
       if (!active) return
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
+          // Don't steal focus from a real text input — sidebar rename,
+          // search bar, settings field, etc. Single-click into a session
+          // races with double-click-to-rename; if the user landed on the
+          // rename input, leave it alone.
+          const ae = document.activeElement
+          const tag = ae?.tagName
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || (ae as HTMLElement | null)?.isContentEditable) {
+            return
+          }
           termRef.current?.focus()
         })
       })
