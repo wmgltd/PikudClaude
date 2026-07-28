@@ -158,6 +158,7 @@ export function App(): JSX.Element {
   const [scrollbackInitialSearch, setScrollbackInitialSearch] = useState<string | undefined>(
     undefined
   )
+  const [scrollbackSearchOccurrence, setScrollbackSearchOccurrence] = useState(0)
   const [view, setView] = useState<'terminal' | 'dashboard' | 'stats'>('terminal')
   const [promptHistory, setPromptHistory] = useState<
     Record<string, Array<{ text: string; ts: number }>>
@@ -390,9 +391,10 @@ export function App(): JSX.Element {
   // the old content is actually available.
   useEffect(() => {
     const handler = (e: Event): void => {
-      const detail = (e as CustomEvent<string>).detail
-      if (!detail) return
-      setScrollbackInitialSearch(detail)
+      const detail = (e as CustomEvent<{ text: string; occurrence: number }>).detail
+      if (!detail?.text) return
+      setScrollbackInitialSearch(detail.text)
+      setScrollbackSearchOccurrence(detail.occurrence ?? 0)
       setShowScrollback(true)
     }
     window.addEventListener('pk:jump-to-text', handler as EventListener)
@@ -1044,9 +1046,11 @@ export function App(): JSX.Element {
         <ScrollbackOverlay
           sessionId={activeId}
           initialSearch={scrollbackInitialSearch}
+          initialSearchOccurrence={scrollbackSearchOccurrence}
           onClose={() => {
             setShowScrollback(false)
             setScrollbackInitialSearch(undefined)
+            setScrollbackSearchOccurrence(0)
           }}
         />
       )}

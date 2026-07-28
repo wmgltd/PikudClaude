@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 interface Message {
   id: string
@@ -15,6 +15,24 @@ interface Props {
 
 const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
 const COLLAPSE_LINES = 18
+
+/**
+ * The needle we hand the scrollback overlay. The first line alone is far too
+ * weak — "yes", "continue", "hey pikudclaude" all collapse onto each other —
+ * so take the first few non-empty lines and let the overlay narrow down from
+ * there. Whitespace is collapsed because tmux re-wraps long lines and the
+ * overlay matches on the same normalized projection.
+ */
+function jumpSnippet(text: string): string {
+  return text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 200)
+}
 
 export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | null {
   const [messages, setMessages] = useState<Message[]>([])
@@ -67,6 +85,23 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
     if (m.role === 'tool_use' || m.role === 'tool_result') return filters.tools
     return true
   })
+
+  // How many earlier messages open with the same snippet. The scrollback holds
+  // every repeat of "yes" / "continue" in the same order the transcript does,
+  // so this ordinal is what lets the overlay land on the copy you clicked
+  // instead of the first one in the buffer. Counted over ALL messages, not the
+  // filtered view — the terminal shows everything regardless of the chips.
+  const occurrenceById = useMemo(() => {
+    const seen = new Map<string, number>()
+    const out = new Map<string, number>()
+    for (const m of messages) {
+      const key = jumpSnippet(m.text)
+      const n = seen.get(key) ?? 0
+      out.set(m.id, n)
+      seen.set(key, n + 1)
+    }
+    return out
+  }, [messages])
 
   // Pin scroll to bottom for the entire initial-load phase (so even if events
   // come in batches, each render keeps us pinned). Once the backlog is fully
@@ -144,6 +179,7 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
           <ConvBubble
             key={m.id}
             msg={m}
+            occurrence={occurrenceById.get(m.id) ?? 0}
             expanded={expanded.has(m.id)}
             onToggle={() =>
               setExpanded((prev) => {
@@ -162,11 +198,12 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
 
 interface BubbleProps {
   msg: Message
+  occurrence: number
   expanded: boolean
   onToggle: () => void
 }
 
-function ConvBubble({ msg, expanded, onToggle }: BubbleProps): JSX.Element {
+function ConvBubble({ msg, occurrence, expanded, onToggle }: BubbleProps): JSX.Element {
   const lines = msg.text.split('\n')
   const isLong = lines.length > COLLAPSE_LINES
   const visibleText = isLong && !expanded ? lines.slice(0, COLLAPSE_LINES).join('\n') : msg.text
@@ -177,10 +214,11 @@ function ConvBubble({ msg, expanded, onToggle }: BubbleProps): JSX.Element {
     // Don't hijack the click if the user is selecting text in the bubble.
     const sel = window.getSelection()
     if (sel && !sel.isCollapsed && sel.toString().trim()) return
-    const firstLine = lines.find((l) => l.trim()) ?? msg.text
-    const snippet = firstLine.trim()
+    const snippet = jumpSnippet(msg.text)
     if (!snippet) return
-    window.dispatchEvent(new CustomEvent('pk:jump-to-text', { detail: snippet }))
+    window.dispatchEvent(
+      new CustomEvent('pk:jump-to-text', { detail: { text: snippet, occurrence } })
+    )
   }
 
   return (
