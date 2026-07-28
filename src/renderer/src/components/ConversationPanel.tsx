@@ -14,13 +14,14 @@ interface Props {
 }
 
 const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
-const COLLAPSE_LINES = 3
+const COLLAPSE_LINES = 18
 
 export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | null {
   const [messages, setMessages] = useState<Message[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [syncing, setSyncing] = useState(true)
-  const [showTools, setShowTools] = useState(false)
+  const [filters, setFilters] = useState({ mine: true, replies: true, tools: false })
+  const toggle = (k: keyof typeof filters): void => setFilters((f) => ({ ...f, [k]: !f[k] }))
   const listRef = useRef<HTMLDivElement>(null)
   // phase: 'initial' = pin to bottom on every render (initial backlog loading,
   // including after a /clear reset). 'live' = only auto-scroll on new messages
@@ -60,9 +61,12 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
     }
   }, [sessionId])
 
-  const visible = showTools
-    ? messages
-    : messages.filter((m) => m.role === 'user' || m.role === 'assistant')
+  const visible = messages.filter((m) => {
+    if (m.role === 'user') return filters.mine
+    if (m.role === 'assistant') return filters.replies
+    if (m.role === 'tool_use' || m.role === 'tool_result') return filters.tools
+    return true
+  })
 
   // Pin scroll to bottom for the entire initial-load phase (so even if events
   // come in batches, each render keeps us pinned). Once the backlog is fully
@@ -102,14 +106,32 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
         <span>Conversation</span>
         {syncing && <span className="conv-syncing">syncing…</span>}
         <span className="conv-count">{visible.length}</span>
-        <button
-          type="button"
-          className={`conv-tools-toggle ${showTools ? 'on' : ''}`}
-          onClick={() => setShowTools((v) => !v)}
-          title={showTools ? 'Hide tool calls' : 'Show tool calls'}
-        >
-          tools
-        </button>
+        <div className="conv-filters">
+          <button
+            type="button"
+            className={`conv-filter ${filters.mine ? 'on' : ''}`}
+            onClick={() => toggle('mine')}
+            title="Show your prompts"
+          >
+            Mine
+          </button>
+          <button
+            type="button"
+            className={`conv-filter ${filters.replies ? 'on' : ''}`}
+            onClick={() => toggle('replies')}
+            title="Show Claude's replies"
+          >
+            Replies
+          </button>
+          <button
+            type="button"
+            className={`conv-filter ${filters.tools ? 'on' : ''}`}
+            onClick={() => toggle('tools')}
+            title="Show tool calls and results"
+          >
+            Tools
+          </button>
+        </div>
         <button className="icon-btn" onClick={onClose} title="Close (⌘J)">
           ×
         </button>
