@@ -1,6 +1,6 @@
 cask "pikudclaude" do
-  version "0.3.0"
-  sha256 "4841c12ef8a58db88dec382bedddcc13277de42937e5e8cb02e46f77d2b7d712"
+  version "0.3.2"
+  sha256 "2ac6110c84807ff8a5ed12d1652d998a91a50fdee461ac5830c806e5d8d45f92"
 
   url "https://github.com/wmgltd/PikudClaude/releases/download/v#{version}/PikudClaude-#{version}-arm64.dmg",
       verified: "github.com/wmgltd/PikudClaude/"
@@ -13,7 +13,7 @@ cask "pikudclaude" do
     strategy :github_latest
   end
 
-  depends_on macos: ">= :monterey"
+  depends_on macos: :monterey
   depends_on arch: :arm64
   depends_on formula: "tmux"
 
