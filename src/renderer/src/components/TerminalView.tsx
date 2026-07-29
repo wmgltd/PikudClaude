@@ -18,6 +18,12 @@ interface Props {
   preferredIDE?: 'cursor' | 'vscode' | 'finder'
   onOpenScrollback?: () => void
   onPromptSubmit?: (prompt: string) => void
+  // Size plumbing for hidden terminals. Only the active terminal can measure
+  // itself (hidden ones are display:none, so FitAddon sees a 0-px parent), so
+  // the active one reports its fitted size via onFit and every hidden terminal
+  // adopts it through sharedSize. See the sharedSize effect below.
+  onFit?: (cols: number, rows: number) => void
+  sharedSize?: { cols: number; rows: number } | null
 }
 
 const DEFAULT_FONT_FAMILY =
@@ -41,14 +47,18 @@ export function TerminalView({
   theme = DEFAULT_THEME,
   preferredIDE = 'cursor',
   onOpenScrollback,
-  onPromptSubmit
+  onPromptSubmit,
+  onFit,
+  sharedSize = null
 }: Props): JSX.Element {
   const onOpenScrollbackRef = useRef(onOpenScrollback)
   const onPromptSubmitRef = useRef(onPromptSubmit)
+  const onFitRef = useRef(onFit)
   useEffect(() => {
     onOpenScrollbackRef.current = onOpenScrollback
     onPromptSubmitRef.current = onPromptSubmit
-  }, [onOpenScrollback, onPromptSubmit])
+    onFitRef.current = onFit
+  }, [onOpenScrollback, onPromptSubmit, onFit])
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -519,6 +529,10 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
       })
       term.onResize(({ cols, rows }) => {
         window.api.resizeSession(session.id, cols, rows)
+        // Only the visible terminal measured a real layout, so only it is
+        // allowed to publish the size the hidden ones should adopt. Hidden
+        // terminals resizing (from sharedSize) must not feed back here.
+        if (activeRef.current) onFitRef.current?.(cols, rows)
       })
     }
     init()
@@ -545,6 +559,27 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
     activeRef.current = active
     if (active) bidiObserverRef.current?.forceRetagNow()
   }, [active])
+
+  // Hidden terminals are display:none, so FitAddon measures a 0-px parent and
+  // silently declines to refit — which is why opening the conversation panel
+  // used to strand every backgrounded session at the narrow width in xterm
+  // *and* in tmux (Claude Code then re-wraps its scrollback there for good).
+  // Every mounted terminal shares one .terminal-area box, so the size the
+  // active terminal measured is exactly right for the hidden ones: apply it
+  // directly, no measurement needed.
+  useEffect(() => {
+    if (active || !sharedSize) return
+    const term = termRef.current
+    if (!term) return
+    const { cols, rows } = sharedSize
+    if (cols < 1 || rows < 1) return
+    if (term.cols === cols && term.rows === rows) return
+    try {
+      term.resize(cols, rows)
+    } catch {
+      /* noop */
+    }
+  }, [active, sharedSize])
 
   useEffect(() => {
     if (!active) return

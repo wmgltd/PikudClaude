@@ -160,6 +160,14 @@ export function App(): JSX.Element {
   )
   const [scrollbackSearchOccurrence, setScrollbackSearchOccurrence] = useState(0)
   const [view, setView] = useState<'terminal' | 'dashboard' | 'stats'>('terminal')
+  // Last size the *visible* terminal fitted to. Mounted-but-hidden terminals
+  // can't measure themselves (display:none), so they adopt this instead of
+  // being stranded at whatever width they had when they were last on screen —
+  // e.g. the 44 columns the conversation panel takes away.
+  const [termSize, setTermSize] = useState<{ cols: number; rows: number } | null>(null)
+  const onTermFit = useCallback((cols: number, rows: number) => {
+    setTermSize((prev) => (prev && prev.cols === cols && prev.rows === rows ? prev : { cols, rows }))
+  }, [])
   const [promptHistory, setPromptHistory] = useState<
     Record<string, Array<{ text: string; ts: number }>>
   >({})
@@ -939,6 +947,8 @@ export function App(): JSX.Element {
               cursorBlink={settings.appearance.cursorBlink}
               theme={resolveTheme(settings.appearance)}
               preferredIDE={settings.sessions.preferredIDE}
+              onFit={onTermFit}
+              sharedSize={termSize}
               onOpenScrollback={() => setShowScrollback(true)}
               onPromptSubmit={(prompt) => {
                 // Stats are recorded regardless of trackPrompts (which only
