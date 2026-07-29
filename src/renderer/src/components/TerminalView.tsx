@@ -250,18 +250,37 @@ export function TerminalView({
           .catch(() => undefined)
       }, 90)
     }
+    // Cell under the pointer, 1-based, in X10's 1..223 range. We used to hard-
+    // code (1,1): harmless for a plain shell (tmux only needs to know which
+    // pane), but wrong for an app that owns the mouse — the smart WheelUpPane
+    // binding forwards the event with `send-keys -M`, so Claude Code received
+    // every scroll as happening in the top-left corner and ignored it. One
+    // tmux client per session means pane coordinates are client coordinates.
+    const cellUnderPointer = (ev: WheelEvent): { x: number; y: number } => {
+      const screen = term.element?.querySelector('.xterm-screen') as HTMLElement | null
+      const rect = (screen ?? term.element)?.getBoundingClientRect()
+      if (!rect || rect.width <= 0 || rect.height <= 0) return { x: 1, y: 1 }
+      const col = Math.floor((ev.clientX - rect.left) / (rect.width / term.cols)) + 1
+      const row = Math.floor((ev.clientY - rect.top) / (rect.height / term.rows)) + 1
+      return {
+        x: Math.min(223, Math.max(1, col)),
+        y: Math.min(223, Math.max(1, row))
+      }
+    }
+
     term.attachCustomWheelEventHandler((ev) => {
       if (dragInProgress) return false
       if (ev.deltaY === 0) return false
       wheelAccum += ev.deltaY
       const threshold = 30
+      const cell = cellUnderPointer(ev)
       let seq = ''
       while (Math.abs(wheelAccum) >= threshold) {
         const dir = wheelAccum < 0 ? -1 : 1
         const code = dir < 0 ? 64 : 65
         const btn = String.fromCharCode(code + 32)
-        const x = String.fromCharCode(33)
-        const y = String.fromCharCode(33)
+        const x = String.fromCharCode(cell.x + 32)
+        const y = String.fromCharCode(cell.y + 32)
         seq += `\x1b[M${btn}${x}${y}`
         if (dir < 0) {
           scrollDepthRef.current += 1
@@ -583,11 +602,7 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
           // search bar, settings field, etc. Single-click into a session
           // races with double-click-to-rename; if the user landed on the
           // rename input, leave it alone.
-          const ae = document.activeElement
-          const tag = ae?.tagName
-          if (tag === 'INPUT' || tag === 'TEXTAREA' || (ae as HTMLElement | null)?.isContentEditable) {
-            return
-          }
+          if (isTextEntryFocused()) return
           termRef.current?.focus()
         })
       })
@@ -595,6 +610,23 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
     window.addEventListener('pk:focus-terminal', handler as EventListener)
     return () => window.removeEventListener('pk:focus-terminal', handler as EventListener)
   }, [active, session.id])
+
+  // Bringing the app back to the front (⌘-Tab, dock click, clicking the
+  // window) used to leave the terminal unfocused — the first thing you typed
+  // went nowhere and you had to click into the pane first. Re-focus the
+  // active session's terminal on window focus, unless a real form field owns
+  // it (a half-typed rename or search must survive the app switch).
+  useEffect(() => {
+    if (!active) return
+    const onWindowFocus = (): void => {
+      requestAnimationFrame(() => {
+        if (isTextEntryFocused()) return
+        termRef.current?.focus()
+      })
+    }
+    window.addEventListener('focus', onWindowFocus)
+    return () => window.removeEventListener('focus', onWindowFocus)
+  }, [active])
 
   useEffect(() => {
     const term = termRef.current
@@ -811,6 +843,23 @@ const MOUSE_TRACKING_RE = /\x1b\[\?(?:1000|1001|1002|1003|1004|1005|1006|1015)[h
 
 function stripMouseTracking(data: string): string {
   return data.replace(MOUSE_TRACKING_RE, '')
+}
+
+/**
+ * True when the user is typing into a real form field (sidebar rename, search
+ * box, a settings input) and we must not yank focus away.
+ *
+ * xterm's own hidden input is deliberately excluded: it's a `<textarea>`, but
+ * it IS the terminal, not a field the user is editing. Counting it here made
+ * every re-focus a no-op whenever another (LRU-mounted) terminal still held
+ * focus — switching sessions left the new pane unfocused.
+ */
+function isTextEntryFocused(): boolean {
+  const ae = document.activeElement as HTMLElement | null
+  if (!ae) return false
+  if (ae.classList.contains('xterm-helper-textarea') || ae.closest('.xterm')) return false
+  const tag = ae.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || ae.isContentEditable === true
 }
 
 function quotePath(p: string): string {
