@@ -16,6 +16,8 @@ import type {
   SessionStatus
 } from '../types'
 import { loadSessions, saveSessions } from '../store'
+import { detectAwaiting } from '../../shared/paneState'
+import type { SessionVitals } from '../../shared/vitals'
 
 /**
  * ZellijManager — Windows-native backend for session management.
@@ -120,18 +122,9 @@ function isShellCommand(cmd: string): boolean {
   return SHELL_COMMANDS.has(first)
 }
 
-function detectAwaiting(content: string): boolean {
-  // Same heuristic as the tmux backend: Claude Code's numbered-options prompt
-  // shows a highlighted "❯ N." current option plus other plain "  N." rows.
-  const lines = content.split('\n').slice(-30)
-  let arrowOption = false
-  let plainOption = false
-  for (const line of lines) {
-    if (/^\s*[❯>›]\s*\d+\.\s/.test(line)) arrowOption = true
-    else if (/^\s+\d+\.\s/.test(line)) plainOption = true
-  }
-  return arrowOption && plainOption
-}
+// detectAwaiting is shared with the tmux backend — same Claude prompt, same
+// heuristic. isShellCommand above is NOT shared: zellij reports full command
+// lines and Windows shells, so it needs its own tokenizing variant.
 
 /**
  * Per-session runtime state we can't put on SessionMeta (those serialize to
@@ -538,10 +531,30 @@ export class ZellijManager extends EventEmitter {
     this.paneCommandMap.delete(id)
   }
 
+  /**
+   * Not implemented for zellij: there is no equivalent of tmux's
+   * `#{session_activity}`, and the pane-pid walk would need a different source.
+   * Returning an empty list makes the sidebar simply omit the vitals line
+   * rather than show wrong numbers.
+   */
+  async getVitals(): Promise<SessionVitals[]> {
+    return []
+  }
+
   write(id: string, data: string): void {
     const a = this.attached.get(id)
     if (!a) return
     a.pty.write(data)
+  }
+
+  /**
+   * Byte-exact counterpart of write() — see TmuxManager.writeBinary for why
+   * mouse reports must not go through node-pty's UTF-8 string encoding.
+   */
+  writeBinary(id: string, latin1Seq: string): void {
+    const a = this.attached.get(id)
+    if (!a) return
+    a.pty.write(Buffer.from(latin1Seq, 'latin1'))
   }
 
   async sendText(id: string, text: string): Promise<void> {

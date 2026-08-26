@@ -16,6 +16,8 @@
   "include": [
     "electron.vite.config.ts",
     "src/main/**/*",
-    "src/preload/**/*"
-  ]
+    "src/preload/**/*",
+    "src/shared/**/*"
+  ],
+  "exclude": ["src/shared/**/*.test.ts"]
 }

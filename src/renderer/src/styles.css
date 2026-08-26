@@ -2197,6 +2197,97 @@ kbd {
   padding: 32px 12px;
   font-style: italic;
 }
+/* Session hygiene: idle age + resident memory, shown only once a session has
+   gone a full day untouched so the sidebar stays quiet in normal use. */
+.session-idle {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+.idle-summary {
+  margin: 6px 8px 4px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgba(180, 83, 9, 0.12);
+  border: 1px solid rgba(180, 83, 9, 0.35);
+  color: #fcd34d;
+  font-size: 10px;
+  text-align: center;
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Stall banner. Only `opacity` is animated and `will-change` promotes it to its
+   own layer, so Chromium keeps the animation on the compositor thread — that is
+   what lets it appear while the main thread is blocked. Do NOT animate any
+   layout- or paint-affecting property here or it falls back to the main thread
+   and stops working during exactly the freeze it exists to report. */
+.stall-banner {
+  position: fixed;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 560px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: rgba(66, 32, 6, 0.96);
+  border: 1px solid #b45309;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  color: #fde68a;
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0;
+  will-change: opacity;
+  pointer-events: none;
+}
+.stall-banner .stall-text strong {
+  color: #fbbf24;
+}
+.stall-pulse {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #f59e0b;
+}
+.stall-reason {
+  display: block;
+  margin-top: 4px;
+  color: #fcd34d;
+  opacity: 0.85;
+}
+.stall-toast {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000;
+  padding: 7px 14px;
+  border-radius: 8px;
+  background: rgba(20, 20, 28, 0.95);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.conv-truncated {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 8px 12px 12px;
+  font-style: italic;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 8px;
+}
 .conv-bubble {
   background: var(--bg-elev-2, rgba(255, 255, 255, 0.04));
   border: 1px solid var(--border);

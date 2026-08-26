@@ -14,6 +14,7 @@ import { ScrollbackOverlay } from './components/ScrollbackOverlay'
 import { Dashboard } from './components/Dashboard'
 import { StatsView } from './components/StatsView'
 import { ConversationPanel } from './components/ConversationPanel'
+import { StallIndicator } from './components/StallIndicator'
 import { IS_MAC } from './utils/platform'
 import type { SessionMeta, SessionStatus, Settings } from './types'
 import { resolveTheme } from './types'
@@ -37,7 +38,9 @@ const DEFAULT_SETTINGS: Settings = {
     autoBookmarkOnPrompt: false,
     trackPrompts: true,
     recentProjectsMax: 6,
-    preferredIDE: 'cursor'
+    preferredIDE: 'cursor',
+    initialCommandsLibrary: [],
+    projectsRoot: ''
   },
   appearance: {
     fontSize: 13,
@@ -53,8 +56,17 @@ const DEFAULT_SETTINGS: Settings = {
       selectionBackground: '#7c3aed55'
     }
   },
+  updates: {
+    channel: 'stable',
+    autoCheck: true
+  },
   ui: {
     welcomeShown: false
+  },
+  telemetry: {
+    enabled: false,
+    consentShownAt: 0,
+    lastHeartbeatAt: 0
   }
 }
 
@@ -354,7 +366,7 @@ export function App(): JSX.Element {
     const ids = new Set(sessions.map((s) => s.id))
     setPromptHistory((prev) => {
       let changed = false
-      const next: Record<string, string> = {}
+      const next: Record<string, Array<{ text: string; ts: number }>> = {}
       for (const [id, p] of Object.entries(prev)) {
         if (ids.has(id)) next[id] = p
         else changed = true
@@ -821,6 +833,7 @@ export function App(): JSX.Element {
 
   return (
     <div className="app-shell">
+      <StallIndicator />
       <TopBar
         session={activeSession}
         lastPrompt={activeId ? promptHistory[activeId]?.[0]?.text ?? null : null}

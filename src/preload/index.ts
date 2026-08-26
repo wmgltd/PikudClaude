@@ -1,4 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { Settings } from '../shared/settings'
+import type { ActiveUsageBlock } from '../shared/usage'
+import type { SessionVitals } from '../shared/vitals'
 import type { IpcRendererEvent } from 'electron'
 
 interface SessionMeta {
@@ -47,47 +50,14 @@ interface ProjectInfo {
   kind: string
 }
 
-type ThemeName = 'default' | 'solarized-dark' | 'dracula' | 'nord' | 'light' | 'custom'
-type CursorStyle = 'block' | 'underline' | 'bar'
-type SoundType = 'chime' | 'beep'
 
-interface Settings {
-  notifications: {
-    soundEnabled: boolean
-    soundType: SoundType
-    volume: number
-    systemNotifications: boolean
-    onlyWhenUnfocused: boolean
-    quietHoursEnabled: boolean
-    quietHoursStart: string
-    quietHoursEnd: string
-  }
-  sessions: {
-    defaultInitialCommand: string
-    defaultCwd: string
-    defaultColor: string
-    autoBookmarkOnAwaiting: boolean
-    recentProjectsMax: number
-    preferredIDE: 'cursor' | 'vscode' | 'finder'
-  }
-  appearance: {
-    fontSize: number
-    fontFamily: string
-    lineHeight: number
-    cursorStyle: CursorStyle
-    cursorBlink: boolean
-    theme: ThemeName
-    customTheme: {
-      background: string
-      foreground: string
-      cursor: string
-      selectionBackground: string
-    }
-  }
-  ui: {
-    welcomeShown: boolean
-  }
+interface MemoryPressure {
+  swapUsedMB: number
+  swapTotalMB: number
+  ramTotalMB: number
+  critical: boolean
 }
+
 
 const api = {
   listSessions: (): Promise<SessionMeta[]> => ipcRenderer.invoke('tmux:list'),
@@ -103,6 +73,10 @@ const api = {
   detachSession: (id: string): Promise<void> => ipcRenderer.invoke('tmux:detach', id),
   writeSession: (id: string, data: string): Promise<void> =>
     ipcRenderer.invoke('tmux:write', id, data),
+  // Every code unit of `data` must be 0..255 and is written as one raw byte.
+  // Used for X10 mouse reports, which break if UTF-8 encoded.
+  writeSessionBytes: (id: string, data: string): Promise<void> =>
+    ipcRenderer.invoke('tmux:write-binary', id, data),
   isInCopyMode: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('tmux:in-copy-mode', id),
   sendText: (id: string, text: string): Promise<void> =>
@@ -129,6 +103,7 @@ const api = {
   },
   getStatuses: (): Promise<Record<string, SessionStatus>> =>
     ipcRenderer.invoke('tmux:get-statuses'),
+  getSessionVitals: (): Promise<SessionVitals[]> => ipcRenderer.invoke('tmux:get-vitals'),
   captureLive: (id: string): Promise<string> => ipcRenderer.invoke('tmux:capture-live', id),
   captureScrollback: (id: string): Promise<string> =>
     ipcRenderer.invoke('tmux:capture-scrollback', id),
@@ -156,6 +131,8 @@ const api = {
               ts: number
               toolName?: string
             }>
+            // 'initial' only: the transcript was longer than what we loaded.
+            truncated?: boolean
           }
         | { type: 'reset' }
         | { type: 'sync_complete' }
@@ -186,14 +163,16 @@ const api = {
   saveSettings: (next: Partial<Settings>): Promise<Settings> =>
     ipcRenderer.invoke('settings:save', next),
 
-  getActiveBlock: (): Promise<{
-    startTime: string
-    endTime: string
-    totalTokens: number
-    costUSD: number
-    msUntilReset: number
-    percentUsed: number | null
-  } | null> => ipcRenderer.invoke('usage:get-active-block'),
+  getActiveBlock: (): Promise<ActiveUsageBlock | null> =>
+    ipcRenderer.invoke('usage:get-active-block'),
+
+  getMemoryPressure: (): Promise<MemoryPressure | null> =>
+    ipcRenderer.invoke('system:get-memory-pressure'),
+  onMemoryPressure: (handler: (p: MemoryPressure) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, p: MemoryPressure): void => handler(p)
+    ipcRenderer.on('system:memory-pressure', listener)
+    return () => ipcRenderer.removeListener('system:memory-pressure', listener)
+  },
 
   checkForUpdatesNow: (): Promise<{
     ok: boolean
@@ -212,6 +191,9 @@ const api = {
 
   getGitBranch: (cwd: string): Promise<string | null> =>
     ipcRenderer.invoke('git:get-branch', cwd),
+
+  writeClipboard: (text: string): Promise<void> =>
+    ipcRenderer.invoke('app:clipboard-write', text),
 
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('app:get-version'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:open-external', url),

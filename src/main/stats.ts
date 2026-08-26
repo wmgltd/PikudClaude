@@ -1,4 +1,11 @@
-import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
 
@@ -85,7 +92,14 @@ export function recordBookmarkCreated(sessionId: string, cwd: string): void {
   recordEvent({ type: 'bookmark_created', sessionId, cwd })
 }
 
-function recordEvent(partial: Omit<StatsEvent, 'ts'>): void {
+/**
+ * `Omit<Union, K>` collapses a discriminated union to its COMMON keys, which
+ * silently rejected every event-specific field. Distribute over the union so
+ * each member keeps its own shape.
+ */
+type NewEvent<T> = T extends unknown ? Omit<T, 'ts'> : never
+
+function recordEvent(partial: NewEvent<StatsEvent>): void {
   if (!partial.cwd || !partial.sessionId) return
   const evt = { ts: Date.now(), ...partial } as StatsEvent
   try {
@@ -149,15 +163,20 @@ export function readEventsForDay(dayKey: string): StatsEvent[] {
   return readAllEvents().filter((e) => e.ts >= start && e.ts < end)
 }
 
-function readAllEvents(): StatsEvent[] {
-  const path = eventsFile()
-  if (!existsSync(path)) return []
-  let raw: string
-  try {
-    raw = readFileSync(path, 'utf8')
-  } catch {
-    return []
-  }
+// The event log is append-only and had no upper bound — it reached 19 MB in a
+// few months of normal use. Opening the Stats view calls readAllEvents several
+// times (summary, heatmap, project detail), and each call used to re-read and
+// re-parse the whole file synchronously on the main process. That is the same
+// shape as the 104 MB transcript bug: harmless until it isn't.
+//
+// Two bounds. Retention keeps the file roughly proportional to the longest
+// range the UI can ask for, and the cache means one Stats view open parses at
+// most once instead of once per query.
+const EVENT_RETENTION_DAYS = 400 // the widest UI range is 365
+
+let cache: { events: StatsEvent[]; size: number; mtimeMs: number } | null = null
+
+function parseEvents(raw: string): StatsEvent[] {
   const out: StatsEvent[] = []
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
@@ -168,6 +187,56 @@ function readAllEvents(): StatsEvent[] {
     }
   }
   return out
+}
+
+function readAllEvents(): StatsEvent[] {
+  const path = eventsFile()
+  let stat: { size: number; mtimeMs: number }
+  try {
+    stat = statSync(path)
+  } catch {
+    return []
+  }
+  // Appends change both size and mtime, so this invalidates on its own.
+  if (cache && cache.size === stat.size && cache.mtimeMs === stat.mtimeMs) {
+    return cache.events
+  }
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    return []
+  }
+  const events = parseEvents(raw)
+  cache = { events, size: stat.size, mtimeMs: stat.mtimeMs }
+  return events
+}
+
+/**
+ * Drop events past the retention window and rewrite the log. Call once at
+ * startup — it is a synchronous rewrite, so it must not sit on a timer.
+ *
+ * Deliberately not using writeAtomic(): that keeps three rotating backups,
+ * which for a multi-megabyte analytics log would cost more disk than the log
+ * itself. A tmp+rename is atomic enough for data whose worst-case loss is some
+ * history in a chart.
+ */
+export function compactEventsLog(): void {
+  const path = eventsFile()
+  if (!existsSync(path)) return
+  try {
+    const cutoff = Date.now() - EVENT_RETENTION_DAYS * DAY_MS
+    const all = parseEvents(readFileSync(path, 'utf8'))
+    const kept = all.filter((e) => e.ts >= cutoff)
+    // Nothing aged out — leave the file (and its mtime) alone.
+    if (kept.length === all.length) return
+    const tmp = `${path}.tmp.${process.pid}`
+    writeFileSync(tmp, kept.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8')
+    renameSync(tmp, path)
+    cache = null
+  } catch {
+    /* analytics must never break startup */
+  }
 }
 
 function dateKey(ts: number): string {

@@ -1,4 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
+import {
+  formatIdle,
+  formatMB,
+  STALE_SESSION_MS,
+  type SessionVitals
+} from '../../../shared/vitals'
 import type { SessionMeta, SessionStatus } from '../types'
 import { basename } from '../utils/path'
 import { IS_MAC } from '../utils/platform'
@@ -68,6 +74,41 @@ export function Sidebar({
     (n, s) => (statuses[s.id] === 'awaiting' ? n + 1 : n),
     0
   )
+
+  // Every live session holds a Claude Code process. On a memory-constrained
+  // machine, knowing which ones have been sitting untouched for days is the
+  // difference between a responsive app and a thrashing one — and the app
+  // already has the data, it just never showed it. Costs three subprocesses per
+  // poll regardless of session count, so a slow timer is plenty.
+  const [vitals, setVitals] = useState<Record<string, SessionVitals>>({})
+  useEffect(() => {
+    let alive = true
+    const refresh = (): void => {
+      if (document.hidden) return
+      window.api
+        .getSessionVitals()
+        .then((rows) => {
+          if (!alive) return
+          const byId: Record<string, SessionVitals> = {}
+          for (const r of rows) byId[r.id] = r
+          setVitals(byId)
+        })
+        .catch(() => undefined)
+    }
+    refresh()
+    const t = window.setInterval(refresh, 30_000)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [])
+
+  const stale = sessions.filter(
+    (s) => (vitals[s.id]?.idleMs ?? 0) > STALE_SESSION_MS
+  )
+  const staleMB = stale.reduce((n, s) => n + (vitals[s.id]?.rssMB ?? 0), 0)
   // How many sessions share each folder — drives the "⧉ ×N" badge that flags
   // duplicate-cwd sessions (the same-project case that confuses the
   // conversation panel's per-session JSONL resolution).
@@ -304,6 +345,15 @@ export function Sidebar({
         </button>
       </div>
       <div className="sidebar-list">
+        {stale.length > 0 && (
+          <div
+            className="idle-summary"
+            title={stale.map((s) => s.name).join('\n')}
+          >
+            {stale.length} idle over a day
+            {staleMB > 0 && ` · ${formatMB(staleMB)} resident`}
+          </div>
+        )}
         {sessions.length === 0 && (
           <div className="empty-state">
             no sessions.<br />
@@ -419,6 +469,23 @@ export function Sidebar({
                   )}
                 </div>
                 <div className="session-cwd">{basename(s.cwd) || s.tmuxName}</div>
+                {(() => {
+                  const v = vitals[s.id]
+                  if (!v || v.idleMs === null || v.idleMs <= STALE_SESSION_MS) return null
+                  return (
+                    <div
+                      className="session-idle"
+                      title={
+                        'Untouched for a while and still holding a live Claude process. ' +
+                        'Memory shown is resident only — a swapped-out session costs more ' +
+                        'than this figure suggests.'
+                      }
+                    >
+                      idle {formatIdle(v.idleMs)}
+                      {v.rssMB !== null && ` · ${formatMB(v.rssMB)}`}
+                    </div>
+                  )
+                })()}
                 {promptHistory[s.id]?.[0]?.text && (
                   <div
                     className="session-prompt"

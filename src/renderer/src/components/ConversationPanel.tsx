@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 interface Message {
   id: string
@@ -15,6 +15,12 @@ interface Props {
 
 const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
 const COLLAPSE_LINES = 18
+// The initial backlog is capped in the main process, but appends are unbounded:
+// over a long session the list grew to thousands of bubbles, and because this
+// panel renders every message (no virtualization) EVERY unrelated re-render —
+// and status events alone reach ~124/minute — had to walk all of them. Keep a
+// rolling window instead; the terminal itself is the full record.
+const MAX_LIVE_MESSAGES = 600
 
 /**
  * The needle we hand the scrollback overlay. The first line alone is far too
@@ -38,8 +44,22 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
   const [messages, setMessages] = useState<Message[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [syncing, setSyncing] = useState(true)
+  // Long-running Claude sessions produce transcripts far too big to load whole
+  // (100 MB+ is routine), so the watcher sends only the tail. Say so instead of
+  // implying this is the entire conversation.
+  const [truncated, setTruncated] = useState(false)
   const [filters, setFilters] = useState({ mine: true, replies: true, tools: false })
   const toggle = (k: keyof typeof filters): void => setFilters((f) => ({ ...f, [k]: !f[k] }))
+  // Stable identity so the memoized bubbles below actually stay memoized — an
+  // inline arrow here would be a fresh prop on every render and defeat it.
+  const toggleExpanded = useCallback((id: string): void => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
   const listRef = useRef<HTMLDivElement>(null)
   // phase: 'initial' = pin to bottom on every render (initial backlog loading,
   // including after a /clear reset). 'live' = only auto-scroll on new messages
@@ -52,6 +72,7 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
     if (!sessionId) return
     setMessages([])
     setSyncing(true)
+    setTruncated(false)
     setExpanded(new Set())
     phaseRef.current = 'initial'
     syncCompletedRef.current = false
@@ -60,10 +81,17 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
     const unsub = window.api.onConversationEvent((evt) => {
       if (evt.type === 'initial') {
         setMessages(evt.messages)
+        setTruncated(Boolean(evt.truncated))
       } else if (evt.type === 'append') {
-        setMessages((prev) => [...prev, ...evt.messages])
+        setMessages((prev) => {
+          const next = [...prev, ...evt.messages]
+          if (next.length <= MAX_LIVE_MESSAGES) return next
+          setTruncated(true)
+          return next.slice(-MAX_LIVE_MESSAGES)
+        })
       } else if (evt.type === 'reset') {
         setMessages([])
+        setTruncated(false)
         phaseRef.current = 'initial'
         lastCountRef.current = 0
       } else if (evt.type === 'sync_complete') {
@@ -175,20 +203,19 @@ export function ConversationPanel({ sessionId, onClose }: Props): JSX.Element | 
         {!syncing && visible.length === 0 && (
           <div className="conv-empty">no messages yet — start talking to Claude</div>
         )}
+        {truncated && visible.length > 0 && (
+          <div className="conv-truncated">
+            showing the most recent part of this conversation — earlier messages are in
+            the transcript but too large to load here
+          </div>
+        )}
         {visible.map((m) => (
           <ConvBubble
             key={m.id}
             msg={m}
             occurrence={occurrenceById.get(m.id) ?? 0}
             expanded={expanded.has(m.id)}
-            onToggle={() =>
-              setExpanded((prev) => {
-                const next = new Set(prev)
-                if (next.has(m.id)) next.delete(m.id)
-                else next.add(m.id)
-                return next
-              })
-            }
+            onToggle={toggleExpanded}
           />
         ))}
       </div>
@@ -200,10 +227,19 @@ interface BubbleProps {
   msg: Message
   occurrence: number
   expanded: boolean
-  onToggle: () => void
+  onToggle: (id: string) => void
 }
 
-function ConvBubble({ msg, occurrence, expanded, onToggle }: BubbleProps): JSX.Element {
+// Memoized: App re-renders on every session-status event (measured at up to
+// ~124/minute), and without this each one re-rendered every bubble in the list.
+// All four props are stable across those renders — `msg` objects come straight
+// out of state and `onToggle` is a useCallback.
+const ConvBubble = memo(function ConvBubble({
+  msg,
+  occurrence,
+  expanded,
+  onToggle
+}: BubbleProps): JSX.Element {
   const lines = msg.text.split('\n')
   const isLong = lines.length > COLLAPSE_LINES
   const visibleText = isLong && !expanded ? lines.slice(0, COLLAPSE_LINES).join('\n') : msg.text
@@ -266,7 +302,7 @@ function ConvBubble({ msg, occurrence, expanded, onToggle }: BubbleProps): JSX.E
               className="conv-more"
               onClick={(e) => {
                 e.stopPropagation()
-                onToggle()
+                onToggle(msg.id)
               }}
             >
               {expanded ? 'show less' : `show ${lines.length - COLLAPSE_LINES} more lines`}
@@ -276,7 +312,7 @@ function ConvBubble({ msg, occurrence, expanded, onToggle }: BubbleProps): JSX.E
       </div>
     </div>
   )
-}
+})
 
 function labelForRole(role: Message['role'], toolName?: string): string {
   if (role === 'user') return 'you'

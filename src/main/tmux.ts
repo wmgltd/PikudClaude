@@ -14,6 +14,8 @@ import type {
 } from './types'
 import { loadSessions, saveSessions, loadCachedTmuxPath, saveCachedTmuxPath } from './store'
 import { resolveClaudeSessionId } from './conversation'
+import { detectAwaiting, isShellCommand, pickRotation } from '../shared/paneState'
+import type { SessionVitals } from '../shared/vitals'
 
 const execFileAsync = promisify(execFile)
 
@@ -101,27 +103,23 @@ const STATUS_BYTE_THRESHOLD = 200
 // as "working".
 const ATTACH_GRACE_MS = 2500
 const AWAITING_POLL_MS = 2000
-
-const SHELL_COMMANDS = new Set([
-  'bash', 'zsh', 'fish', 'sh', 'dash', 'tcsh', 'csh', 'ksh', 'login', 'screen', 'tmux'
-])
-
-function isShellCommand(cmd: string): boolean {
-  if (!cmd) return true
-  const trimmed = cmd.trim().replace(/^-/, '')
-  return SHELL_COMMANDS.has(trimmed)
-}
-
-function detectAwaiting(content: string): boolean {
-  const lines = content.split('\n').slice(-30)
-  let arrowOption = false
-  let plainOption = false
-  for (const line of lines) {
-    if (/^\s*[❯>›]\s*\d+\.\s/.test(line)) arrowOption = true
-    else if (/^\s+\d+\.\s/.test(line)) plainOption = true
-  }
-  return arrowOption && plainOption
-}
+// `capture-pane` costs one subprocess per session, and this poll runs every 2s.
+// Probing every session meant ~11 forks/second at 22 sessions — noticeable on a
+// healthy Mac and actively harmful on one that is already swapping, where each
+// fork has to page in a process image. Attached sessions (the ones the user can
+// actually see) are always probed; the rest rotate through a few per tick, so
+// the fork rate stays bounded no matter how many sessions exist.
+//
+// Cost: a background session's "awaiting" badge can lag by
+// ceil(unattachedCount / BACKGROUND_PROBES_PER_TICK) * AWAITING_POLL_MS —
+// about 8s at 17 background sessions, versus 2s before. That is well inside
+// human reaction time for a "Claude needs you" nudge.
+const BACKGROUND_PROBES_PER_TICK = 4
+// How long after tmux last reported pane output we keep calling a session
+// 'working'. #{window_activity} has one-second resolution and we sample it
+// every AWAITING_POLL_MS, so this has to cover a couple of polls; erring long
+// also stops the dot flickering while Claude pauses between tool calls.
+const ACTIVITY_WORKING_WINDOW_MS = 6000
 
 export class TmuxManager extends EventEmitter {
   private sessions: SessionMeta[] = []
@@ -133,6 +131,13 @@ export class TmuxManager extends EventEmitter {
   private paneCommandMap = new Map<string, string>()
   private statusTimer: NodeJS.Timeout | null = null
   private awaitingTimer: NodeJS.Timeout | null = null
+  // Round-robin position for the background capture-pane rotation.
+  private awaitingProbeCursor = 0
+  // tmux's #{window_activity} (epoch seconds) as of the last poll, and our own
+  // clock reading of when we last saw it advance. Two maps because tmux's value
+  // is coarse and only meaningful as a change detector.
+  private lastWindowActivity = new Map<string, number>()
+  private activityChangedAt = new Map<string, number>()
   private needsRedrawOnAttach = new Set<string>()
   private resurrecting = new Map<string, Promise<void>>()
   private attaching = new Map<string, Promise<void>>()
@@ -352,11 +357,20 @@ export class TmuxManager extends EventEmitter {
 
   private tickStatuses(): void {
     const now = Date.now()
-    // Compute status for every alive session (not just attached). Without
-    // this, the sidebar shows stale statuses on app load until the user
-    // clicks each card. For non-attached sessions we don't have live data
-    // flow, so 'working' can't be detected — but awaiting/shell/idle are
-    // derivable from the pane command + awaiting probe alone.
+    // Compute status for every alive session, attached or not.
+    //
+    // 'working' used to require an attached pty, because the byte-flow window
+    // is the only signal a pty gives us. But only MAX_MOUNTED (5) sessions are
+    // ever attached, so every other session showed green "idle — waiting for
+    // you" the entire time Claude was actually working in it. That is the exact
+    // inverse of the truth, on the majority of sessions.
+    //
+    // tmux's #{window_activity} fixes it: it advances whenever the pane
+    // produces output and stands still when it doesn't, it works with no client
+    // attached, and — verified against a repainting alt-screen app, which is
+    // what Claude Code is — it tracks alt-screen redraws too. We already fetch
+    // it in the same single `list-panes -a` call tickAwaiting makes, so this
+    // costs nothing.
     const aliveIds = new Set(this.sessions.filter((s) => !s.dead).map((s) => s.id))
     for (const id of aliveIds) {
       const isAttached = this.attached.has(id)
@@ -366,10 +380,13 @@ export class TmuxManager extends EventEmitter {
       const totalBytes = recent.reduce((sum, s) => sum + s.size, 0)
       const cmd = this.paneCommandMap.get(id) ?? ''
       const claudeRunning = !isShellCommand(cmd)
+      const outputSeenAt = this.activityChangedAt.get(id) ?? 0
+      const producingOutput = now - outputSeenAt < ACTIVITY_WORKING_WINDOW_MS
       let status: SessionStatus
       if (this.awaitingMap.get(id)) status = 'awaiting'
       else if (!claudeRunning) status = 'shell'
-      else if (isAttached && totalBytes > STATUS_BYTE_THRESHOLD) status = 'working'
+      else if ((isAttached && totalBytes > STATUS_BYTE_THRESHOLD) || producingOutput)
+        status = 'working'
       else status = 'idle'
       if (this.lastEmittedStatus.get(id) !== status) {
         this.lastEmittedStatus.set(id, status)
@@ -397,6 +414,7 @@ export class TmuxManager extends EventEmitter {
     // instead of one `display-message` per session — at N sessions this drops
     // the per-tick spawn count from 2N to N+1. Same data, just batched.
     const cmdByName = new Map<string, string>()
+    const activityByName = new Map<string, number>()
     try {
       // Filter to the ACTIVE pane of the ACTIVE window: without it, a session
       // with multiple windows/panes maps to whichever pane tmux lists LAST —
@@ -405,27 +423,68 @@ export class TmuxManager extends EventEmitter {
       const { stdout } = await execFileAsync(resolveTmuxBin(), [
         '-u', 'list-panes', '-a',
         '-f', '#{&&:#{window_active},#{pane_active}}',
-        '-F', '#{session_name}\t#{pane_current_command}'
+        '-F', '#{session_name}\t#{pane_current_command}\t#{window_activity}'
       ])
       for (const line of stdout.split('\n')) {
-        const tab = line.indexOf('\t')
-        if (tab !== -1) cmdByName.set(line.slice(0, tab), line.slice(tab + 1).trim())
+        const [name, cmd, activity] = line.split('\t')
+        if (!name) continue
+        if (cmd !== undefined) cmdByName.set(name, cmd.trim())
+        const secs = Number(activity)
+        if (Number.isFinite(secs) && secs > 0) activityByName.set(name, secs)
       }
     } catch {
       /* list-panes failed — keep previous paneCommandMap values */
     }
+
+    // Note when each session's output clock last moved. tickStatuses turns
+    // "moved recently" into the amber working dot; see the comment there.
+    const nowMs = Date.now()
+    for (const s of alive) {
+      const seen = activityByName.get(s.tmuxName)
+      if (seen === undefined) continue
+      const prev = this.lastWindowActivity.get(s.id)
+      if (prev === undefined) {
+        // First observation is a baseline, not evidence of activity — without
+        // this every session would flash 'working' on launch.
+        this.lastWindowActivity.set(s.id, seen)
+        continue
+      }
+      if (seen > prev) {
+        this.lastWindowActivity.set(s.id, seen)
+        this.activityChangedAt.set(s.id, nowMs)
+      }
+    }
+    // Partition first, spawn second. `list-panes -a` above already gave us
+    // every pane's command in ONE subprocess, so deciding who needs a
+    // capture-pane is free.
+    const needsProbe: SessionMeta[] = []
+    for (const s of alive) {
+      const cmd = cmdByName.get(s.tmuxName)
+      if (cmd !== undefined) this.paneCommandMap.set(s.id, cmd)
+      // "awaiting" is a Claude prompt state — a plain shell never shows one.
+      // Skip the (heavier) capture-pane for shell panes; that's where most of
+      // the per-tick subprocess cost goes when sessions sit at a shell. A
+      // session mid-transition is corrected on the next tick (2s).
+      if (cmd !== undefined && isShellCommand(cmd)) {
+        this.awaitingMap.set(s.id, false)
+        continue
+      }
+      needsProbe.push(s)
+    }
+
+    // Attached sessions are on screen, so they get probed every tick. Everything
+    // else takes turns — see BACKGROUND_PROBES_PER_TICK.
+    const foreground = needsProbe.filter((s) => this.attached.has(s.id))
+    const background = needsProbe.filter((s) => !this.attached.has(s.id))
+    const { picked: rotation, nextCursor } = pickRotation(
+      background,
+      this.awaitingProbeCursor,
+      BACKGROUND_PROBES_PER_TICK
+    )
+    this.awaitingProbeCursor = nextCursor
+
     await Promise.all(
-      alive.map(async (s) => {
-        const cmd = cmdByName.get(s.tmuxName)
-        if (cmd !== undefined) this.paneCommandMap.set(s.id, cmd)
-        // "awaiting" is a Claude prompt state — a plain shell never shows one.
-        // Skip the (heavier) capture-pane for shell panes; that's where most of
-        // the per-tick subprocess cost goes when sessions sit at a shell. A
-        // session mid-transition is corrected on the next tick (2s).
-        if (cmd !== undefined && isShellCommand(cmd)) {
-          this.awaitingMap.set(s.id, false)
-          return
-        }
+      [...foreground, ...rotation].map(async (s) => {
         try {
           const content = await this.capturePaneText(s.tmuxName, 30)
           this.awaitingMap.set(s.id, detectAwaiting(content))
@@ -467,6 +526,83 @@ export class TmuxManager extends EventEmitter {
     } catch {
       return ''
     }
+  }
+
+  /**
+   * Per-session idle time and resident memory.
+   *
+   * Exists because "which of these 22 sessions can I close?" was a question the
+   * app could answer but didn't — every live session holds a Claude Code
+   * process, and on a memory-constrained machine that is the difference between
+   * working and thrashing. Three subprocesses total regardless of session count,
+   * so it is safe to poll on a slow timer.
+   *
+   * `rssMB` is resident memory only. It UNDERSTATES a swapping machine badly,
+   * where most of a backgrounded process has been paged out — it ranks sessions
+   * against each other honestly, but don't read it as "this is what I get back".
+   */
+  async getVitals(): Promise<SessionVitals[]> {
+    const activityByName = new Map<string, number>()
+    const pidsByName = new Map<string, number[]>()
+    try {
+      const [act, panes] = await Promise.all([
+        tmux('list-sessions', '-F', '#{session_name}\t#{session_activity}'),
+        tmux('list-panes', '-a', '-F', '#{session_name}\t#{pane_pid}')
+      ])
+      for (const line of act.split('\n')) {
+        const [name, ts] = line.split('\t')
+        if (name && ts) activityByName.set(name, Number(ts) * 1000)
+      }
+      for (const line of panes.split('\n')) {
+        const [name, pid] = line.split('\t')
+        if (!name || !pid) continue
+        const list = pidsByName.get(name) ?? []
+        list.push(Number(pid))
+        pidsByName.set(name, list)
+      }
+    } catch {
+      return []
+    }
+
+    // One `ps` for the whole machine, then sum each pane's process subtree —
+    // the Claude process is a grandchild of the pane's shell, not the pane pid.
+    const children = new Map<number, number[]>()
+    const rss = new Map<number, number>()
+    try {
+      const { stdout } = await execFileAsync('/bin/ps', ['-Ao', 'pid=,ppid=,rss='])
+      for (const line of stdout.split('\n')) {
+        const parts = line.trim().split(/\s+/)
+        if (parts.length < 3) continue
+        const pid = Number(parts[0])
+        const ppid = Number(parts[1])
+        if (!pid) continue
+        rss.set(pid, Number(parts[2]) || 0)
+        const sibs = children.get(ppid) ?? []
+        sibs.push(pid)
+        children.set(ppid, sibs)
+      }
+    } catch {
+      /* no memory figures; idle times are still useful */
+    }
+    const subtreeKB = (pid: number, seen = new Set<number>()): number => {
+      if (seen.has(pid)) return 0
+      seen.add(pid)
+      let total = rss.get(pid) ?? 0
+      for (const c of children.get(pid) ?? []) total += subtreeKB(c, seen)
+      return total
+    }
+
+    const now = Date.now()
+    return this.sessions.map((s) => {
+      const pids = pidsByName.get(s.tmuxName) ?? []
+      const kb = pids.reduce((sum, pid) => sum + subtreeKB(pid), 0)
+      const activity = activityByName.get(s.tmuxName)
+      return {
+        id: s.id,
+        idleMs: activity ? Math.max(0, now - activity) : null,
+        rssMB: kb > 0 ? Math.round(kb / 1024) : null
+      }
+    })
   }
 
   getStatuses(): Record<string, SessionStatus> {
@@ -610,6 +746,8 @@ export class TmuxManager extends EventEmitter {
     // tickStatuses to flush as a 'detached' broadcast, then drop.
     this.awaitingMap.delete(id)
     this.paneCommandMap.delete(id)
+    this.lastWindowActivity.delete(id)
+    this.activityChangedAt.delete(id)
   }
 
   async attach(id: string, cols: number, rows: number): Promise<void> {
@@ -747,6 +885,24 @@ export class TmuxManager extends EventEmitter {
     const a = this.attached.get(id)
     if (!a) return
     a.pty.write(data)
+  }
+
+  /**
+   * Write raw bytes, one per code unit of `latin1Seq` (each must be 0..255).
+   *
+   * `write()` above hands node-pty a string, which it encodes as UTF-8. That's
+   * right for typed text but WRONG for X10 mouse reports: their coordinate
+   * bytes are `cell + 32`, so any column past 95 lands above 0x7F and gets
+   * encoded as TWO bytes. tmux then mis-parses the report — the wheel event is
+   * dropped entirely and the leftover byte is delivered to the pane as a
+   * literal character (verified: column 100 typed `4`, column 150 typed `>`,
+   * once per wheel notch). Buffer.from(..., 'latin1') puts exactly one byte on
+   * the wire per code unit, which is the form tmux expects.
+   */
+  writeBinary(id: string, latin1Seq: string): void {
+    const a = this.attached.get(id)
+    if (!a) return
+    a.pty.write(Buffer.from(latin1Seq, 'latin1'))
   }
 
   async sendText(id: string, text: string): Promise<void> {

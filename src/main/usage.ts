@@ -4,18 +4,8 @@ import { appendErrorEntry } from './errorLog'
 
 const execFileAsync = promisify(execFile)
 
-export interface ActiveUsageBlock {
-  startTime: string
-  endTime: string
-  totalTokens: number
-  costUSD: number
-  msUntilReset: number
-  percentUsed: number | null
-  costPerHour: number | null
-  tokensPerMinute: number | null
-  projectedCost: number | null
-  projectedTokens: number | null
-}
+import type { ActiveUsageBlock } from '../shared/usage'
+export type { ActiveUsageBlock }
 
 interface CcusageBlock {
   isActive?: boolean

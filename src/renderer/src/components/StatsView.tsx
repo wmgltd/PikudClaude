@@ -110,8 +110,9 @@ export function StatsView(): JSX.Element {
           <span className="stats-sub">your activity over time, per project</span>
         </div>
         <div className="stats-range" role="tablist">
-          {(Object.keys(RANGE_LABELS) as Array<keyof typeof RANGE_LABELS>).map((k) => {
-            const r = Number(k) as Range
+          {/* Object.keys() widens numeric keys to string[]; convert back
+              rather than asserting across two unrelated types. */}
+          {(Object.keys(RANGE_LABELS).map(Number) as Range[]).map((r) => {
             return (
               <button
                 key={r}

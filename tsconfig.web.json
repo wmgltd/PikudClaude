@@ -15,5 +15,6 @@
     "allowSyntheticDefaultImports": true,
     "types": ["vite/client"]
   },
-  "include": ["src/renderer/**/*", "src/preload/index.d.ts"]
+  "include": ["src/renderer/**/*", "src/preload/index.d.ts", "src/shared/**/*"],
+  "exclude": ["src/shared/**/*.test.ts"]
 }

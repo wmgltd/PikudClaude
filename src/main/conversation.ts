@@ -1,30 +1,67 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync, watch } from 'node:fs'
+import { open, readdir, stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { loadPromptHistory } from './store'
+import {
+  parseLine,
+  projectDirName,
+  scorePrompts,
+  userMessagesFromTail,
+  type ConvMessage,
+  type ConvRole
+} from '../shared/transcript'
 
-export type ConvRole = 'user' | 'assistant' | 'tool_use' | 'tool_result'
+export type { ConvMessage, ConvRole }
 
-export interface ConvMessage {
-  id: string
-  role: ConvRole
-  text: string
-  ts: number
-  toolName?: string
+// Claude transcripts are unbounded — a long-lived project routinely reaches
+// 100 MB+ in a single .jsonl. Reading one whole, synchronously, on the main
+// process (which is what this module used to do) blocked Electron for tens of
+// seconds: keystrokes queued instead of reaching the pty and then all flushed
+// at once, and the panel that was supposed to show the conversation got tens of
+// thousands of bubbles it renders unvirtualized. Bound both ends — the tail is
+// the only part a conversation panel is about.
+const INITIAL_TAIL_BYTES = 2 * 1024 * 1024
+const MAX_INITIAL_MESSAGES = 400
+
+/** Read `length` bytes from `start` without blocking the event loop. */
+async function readRange(path: string, start: number, length: number): Promise<string> {
+  if (length <= 0) return ''
+  const fh = await open(path, 'r')
+  try {
+    const buf = Buffer.alloc(length)
+    const { bytesRead } = await fh.read(buf, 0, length, start)
+    return buf.toString('utf8', 0, bytesRead)
+  } finally {
+    await fh.close()
+  }
 }
 
 export type ConvEvent =
-  | { type: 'initial'; messages: ConvMessage[] }
+  // `truncated` means the transcript was longer than what we loaded — the
+  // panel says so rather than pretending this is the whole conversation.
+  | { type: 'initial'; messages: ConvMessage[]; truncated: boolean }
   | { type: 'append'; messages: ConvMessage[] }
   | { type: 'reset' }
   | { type: 'sync_complete' }
 
-function projectDir(cwd: string): string {
-  // Claude flattens the cwd to a single folder name by swapping every '/' for
-  // '-'. Trailing slash is dropped first; the leading slash becomes a leading
-  // '-' which Claude keeps.
-  const normalized = cwd.replace(/\/+$/, '')
-  return join(homedir(), '.claude', 'projects', normalized.replace(/\//g, '-'))
+/**
+ * Map a working directory to the folder Claude Code keeps its transcripts in.
+ *
+ * Claude flattens the cwd into one folder name by replacing every character
+ * that is not a letter or a digit with '-'. We used to substitute only '/',
+ * which silently broke every session whose path contained anything else: a
+ * space ("…/Geektime APP"), a punctuation mark ("…/!static-websites"), a dot or
+ * an underscore. Those resolved to a directory that does not exist, so the
+ * conversation panel reported "no messages yet" forever while the terminal was
+ * plainly full of conversation.
+ *
+ * The rule is confirmed against the real store: across every folder in
+ * ~/.claude/projects, the only non-alphanumeric character that appears is '-'.
+ * The leading slash becomes the leading '-' that Claude keeps.
+ */
+export function projectDir(cwd: string): string {
+  return join(homedir(), '.claude', 'projects', projectDirName(cwd))
 }
 
 function latestJsonl(dir: string): string | null {
@@ -51,64 +88,31 @@ function latestJsonl(dir: string): string | null {
   }
 }
 
-function extractTextOnly(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  const parts: string[] = []
-  for (const c of content as Array<Record<string, unknown>>) {
-    if (c.type === 'text' && typeof c.text === 'string') parts.push(c.text)
-  }
-  return parts.join('\n').trim()
-}
-
-function parseLine(raw: string): ConvMessage[] {
-  let obj: Record<string, unknown>
+/** Non-blocking twin of latestJsonl, for the live watcher path. */
+async function latestJsonlAsync(dir: string): Promise<string | null> {
+  let files: string[]
   try {
-    obj = JSON.parse(raw) as Record<string, unknown>
+    files = (await readdir(dir)).filter((f) => f.endsWith('.jsonl'))
   } catch {
-    return []
+    return null
   }
-  const type = obj.type as string | undefined
-  if (type !== 'user' && type !== 'assistant') return []
-  const uuid =
-    (obj.uuid as string | undefined) ||
-    ((obj.message as Record<string, unknown> | undefined)?.id as string | undefined) ||
-    `gen:${Math.random().toString(36).slice(2)}`
-  const tsRaw = obj.timestamp as string | undefined
-  const ts = tsRaw ? new Date(tsRaw).getTime() : Date.now()
-  const msg = obj.message as Record<string, unknown> | undefined
-  const content = msg?.content
-  const out: ConvMessage[] = []
-
-  if (typeof content === 'string') {
-    if (content.trim()) out.push({ id: uuid, role: type, text: content, ts })
-    return out
-  }
-  if (!Array.isArray(content)) return out
-
-  let idx = 0
-  for (const c of content as Array<Record<string, unknown>>) {
-    const t = c.type as string | undefined
-    const subId = `${uuid}:${idx++}`
-    if (t === 'text' && typeof c.text === 'string' && c.text.trim()) {
-      out.push({ id: subId, role: type, text: c.text, ts })
-    } else if (t === 'tool_use' && typeof c.name === 'string') {
-      const input =
-        typeof c.input === 'object' && c.input
-          ? Object.entries(c.input as Record<string, unknown>)
-              .slice(0, 6)
-              .map(([k, v]) => `${k}: ${JSON.stringify(v).slice(0, 200)}`)
-              .join('\n')
-          : ''
-      out.push({ id: subId, role: 'tool_use', text: input, ts, toolName: c.name })
-    } else if (t === 'tool_result') {
-      const inner = extractTextOnly(c.content)
-      if (inner.trim()) {
-        out.push({ id: subId, role: 'tool_result', text: inner.slice(0, 2000), ts })
+  let best: string | null = null
+  let bestMtime = -Infinity
+  await Promise.all(
+    files.map(async (f) => {
+      const full = join(dir, f)
+      try {
+        const mt = (await stat(full)).mtimeMs
+        if (mt > bestMtime) {
+          bestMtime = mt
+          best = full
+        }
+      } catch {
+        /* skip */
       }
-    }
-  }
-  return out
+    })
+  )
+  return best
 }
 
 type EventHandler = (event: ConvEvent) => void
@@ -146,7 +150,9 @@ export interface WatchTarget {
 // least one prompt — and the user wouldn't open the conv panel for a
 // session that had no activity in the first place.
 
-function tailUserMessages(jsonlPath: string, maxBytes: number = 512 * 1024): string[] {
+const MATCH_TAIL_BYTES = 512 * 1024
+
+function tailUserMessages(jsonlPath: string, maxBytes: number = MATCH_TAIL_BYTES): string[] {
   // Read up to the last `maxBytes` of the file, parse each line, return
   // user-message text. Sufficient for prompt-matching against the user's
   // recent prompts — they live near the end of the JSONL.
@@ -158,66 +164,39 @@ function tailUserMessages(jsonlPath: string, maxBytes: number = 512 * 1024): str
     const fd = openSync(jsonlPath, 'r')
     readSync(fd, buf, 0, len, start)
     closeSync(fd)
-    const out: string[] = []
-    const lines = buf.toString('utf8').split('\n')
-    // Drop the first line if we sliced into the middle of one.
-    const startIdx = start > 0 ? 1 : 0
-    for (let i = startIdx; i < lines.length; i++) {
-      const line = lines[i]
-      if (!line.trim()) continue
-      let obj: Record<string, unknown>
-      try {
-        obj = JSON.parse(line) as Record<string, unknown>
-      } catch {
-        continue
-      }
-      if (obj.type !== 'user') continue
-      const msg = obj.message as Record<string, unknown> | undefined
-      const content = msg?.content
-      if (typeof content === 'string') {
-        out.push(content)
-      } else if (Array.isArray(content)) {
-        for (const part of content as Array<Record<string, unknown>>) {
-          if (part.type === 'text' && typeof part.text === 'string') out.push(part.text)
-        }
-      }
-    }
-    return out
+    return userMessagesFromTail(buf.toString('utf8'), start > 0)
   } catch {
     return []
   }
 }
 
-function scoreJsonlAgainstPrompts(jsonlPath: string, prompts: string[]): number {
-  if (prompts.length === 0) return 0
-  const msgs = tailUserMessages(jsonlPath)
-  if (msgs.length === 0) return 0
-  let score = 0
-  for (const p of prompts) {
-    const q = p.trim()
-    if (q.length < 4) continue
-    // Use a short signature (first 40 chars) so wrapping/whitespace in
-    // either side doesn't break the match.
-    const sig = q.slice(0, 40)
-    let matched = false
-    for (const m of msgs) {
-      if (m.includes(sig) || sig.includes(m.trim().slice(0, 40))) {
-        matched = true
-        break
-      }
-    }
-    if (matched) score++
+async function tailUserMessagesAsync(jsonlPath: string): Promise<string[]> {
+  try {
+    const sz = (await stat(jsonlPath)).size
+    const start = Math.max(0, sz - MATCH_TAIL_BYTES)
+    const text = await readRange(jsonlPath, start, sz - start)
+    return userMessagesFromTail(text, start > 0)
+  } catch {
+    return []
   }
-  return score
+}
+
+/** The session's most recent prompts, as match signatures. */
+function sessionPrompts(sessionId: string): string[] {
+  try {
+    const history = loadPromptHistory()
+    return (history[sessionId] ?? [])
+      .map((e) => e.text)
+      .filter((t) => typeof t === 'string' && t.trim().length >= 4)
+      .slice(0, 8)
+  } catch {
+    return []
+  }
 }
 
 function pickJsonlByPromptMatch(dir: string, sessionId: string): string | null {
   try {
-    const history = loadPromptHistory()
-    const prompts = (history[sessionId] ?? [])
-      .map((e) => e.text)
-      .filter((t) => typeof t === 'string' && t.trim().length >= 4)
-      .slice(0, 8)
+    const prompts = sessionPrompts(sessionId)
     if (prompts.length === 0) return null
     const files = readdirSync(dir)
       .filter((f) => f.endsWith('.jsonl'))
@@ -225,7 +204,7 @@ function pickJsonlByPromptMatch(dir: string, sessionId: string): string | null {
     let bestPath: string | null = null
     let bestScore = 0
     for (const path of files) {
-      const score = scoreJsonlAgainstPrompts(path, prompts)
+      const score = scorePrompts(tailUserMessages(path), prompts)
       if (score > bestScore) {
         bestScore = score
         bestPath = path
@@ -235,6 +214,36 @@ function pickJsonlByPromptMatch(dir: string, sessionId: string): string | null {
   } catch {
     return null
   }
+}
+
+/** Non-blocking twin of pickJsonlByPromptMatch, for the live watcher path. */
+async function pickJsonlByPromptMatchAsync(
+  dir: string,
+  sessionId: string
+): Promise<string | null> {
+  const prompts = sessionPrompts(sessionId)
+  if (prompts.length === 0) return null
+  let files: string[]
+  try {
+    files = (await readdir(dir)).filter((f) => f.endsWith('.jsonl')).map((f) => join(dir, f))
+  } catch {
+    return null
+  }
+  const scored = await Promise.all(
+    files.map(async (path) => ({
+      path,
+      score: scorePrompts(await tailUserMessagesAsync(path), prompts)
+    }))
+  )
+  let bestPath: string | null = null
+  let bestScore = 0
+  for (const { path, score } of scored) {
+    if (score > bestScore) {
+      bestScore = score
+      bestPath = path
+    }
+  }
+  return bestScore > 0 ? bestPath : null
 }
 
 function soleJsonl(dir: string): string | null {
@@ -282,35 +291,40 @@ export function watchConversation(target: WatchTarget, onEvent: EventHandler): (
   let initialSent = false
   let stopped = false
 
-  const drain = (path: string, fromStart: boolean): ConvMessage[] => {
+  // Set by the fromStart drain when it skipped past the head of the file.
+  let skippedHead = false
+
+  const drain = async (path: string, fromStart: boolean): Promise<ConvMessage[]> => {
     let s
     try {
-      s = statSync(path)
+      s = await stat(path)
     } catch {
       return []
     }
-    if (fromStart) {
-      position = 0
-      buffer = ''
-    } else if (s.size < position) {
-      // truncation — start over
-      position = 0
+    // Both the first read and a post-truncation re-read start from the tail
+    // rather than byte 0 — see INITIAL_TAIL_BYTES.
+    let slicedMidLine = false
+    if (fromStart || s.size < position) {
+      position = Math.max(0, s.size - INITIAL_TAIL_BYTES)
+      slicedMidLine = position > 0
+      skippedHead = slicedMidLine
       buffer = ''
     }
-    if (s.size === position) return []
-    const len = s.size - position
-    const buf = Buffer.alloc(len)
+    if (s.size <= position) return []
+    let text: string
     try {
-      const fd = openSync(path, 'r')
-      readSync(fd, buf, 0, len, position)
-      closeSync(fd)
+      text = await readRange(path, position, s.size - position)
     } catch {
       return []
     }
     position = s.size
-    buffer += buf.toString('utf8')
+    buffer += text
     const lines = buffer.split('\n')
     buffer = lines.pop() ?? ''
+    // Slicing into the tail almost certainly landed mid-line; that fragment is
+    // not valid JSON and would just be dropped by parseLine, but discard it
+    // explicitly so the intent is clear.
+    if (slicedMidLine) lines.shift()
     const out: ConvMessage[] = []
     for (const line of lines) {
       if (!line.trim()) continue
@@ -324,25 +338,37 @@ export function watchConversation(target: WatchTarget, onEvent: EventHandler): (
   // existing). Re-doing the prompt-match every tick would re-scan candidate
   // JSONLs constantly. Cache the chosen path.
   let pickedFile: string | null = null
-  const resolveFile = (): string | null => {
+  const resolveFile = async (): Promise<string | null> => {
     if (pickedFile && existsSync(pickedFile)) return pickedFile
     if (target.siblingCount > 1) {
-      const matched = pickJsonlByPromptMatch(dir, target.sessionId)
+      const matched = await pickJsonlByPromptMatchAsync(dir, target.sessionId)
       if (matched) {
         pickedFile = matched
         return matched
       }
     }
-    pickedFile = latestJsonl(dir)
+    pickedFile = await latestJsonlAsync(dir)
     return pickedFile
   }
 
-  const reconcile = (): void => {
+  // Emit the initial backlog, newest-last, capped. `skippedHead` (bytes we
+  // never read) and the message cap are both reasons the panel isn't showing
+  // the full transcript, so either one flags it as truncated.
+  const emitInitial = (all: ConvMessage[]): void => {
+    const capped = all.length > MAX_INITIAL_MESSAGES ? all.slice(-MAX_INITIAL_MESSAGES) : all
+    onEvent({
+      type: 'initial',
+      messages: capped,
+      truncated: skippedHead || capped.length < all.length
+    })
+  }
+
+  const reconcileOnce = async (): Promise<void> => {
+    const latest = await resolveFile()
     if (stopped) return
-    const latest = resolveFile()
     if (!latest) {
       if (!initialSent) {
-        onEvent({ type: 'initial', messages: [] })
+        onEvent({ type: 'initial', messages: [], truncated: false })
         onEvent({ type: 'sync_complete' })
         initialSent = true
       }
@@ -351,21 +377,47 @@ export function watchConversation(target: WatchTarget, onEvent: EventHandler): (
     if (latest !== currentFile) {
       const isFirst = currentFile === null
       currentFile = latest
-      const all = drain(latest, true)
+      const all = await drain(latest, true)
+      if (stopped) return
       if (isFirst) {
-        onEvent({ type: 'initial', messages: all })
+        emitInitial(all)
         if (!initialSent) {
           onEvent({ type: 'sync_complete' })
           initialSent = true
         }
       } else {
         onEvent({ type: 'reset' })
-        onEvent({ type: 'initial', messages: all })
+        emitInitial(all)
       }
       return
     }
-    const newMsgs = drain(currentFile, false)
+    const newMsgs = await drain(currentFile, false)
+    if (stopped) return
     if (newMsgs.length > 0) onEvent({ type: 'append', messages: newMsgs })
+  }
+
+  // The 1s poll and the directory watcher both call this, and it is now async —
+  // without a gate, a slow first drain would let a second run start against a
+  // half-updated `position`/`buffer` and duplicate or lose messages. Coalesce
+  // overlapping requests into one trailing re-run.
+  let running = false
+  let queued = false
+  const reconcile = (): void => {
+    if (stopped) return
+    if (running) {
+      queued = true
+      return
+    }
+    running = true
+    void reconcileOnce()
+      .catch(() => undefined)
+      .finally(() => {
+        running = false
+        if (queued && !stopped) {
+          queued = false
+          reconcile()
+        }
+      })
   }
 
   reconcile()

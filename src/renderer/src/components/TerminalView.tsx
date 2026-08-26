@@ -5,6 +5,13 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon } from '@xterm/addon-search'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
 import type { SessionMeta, ThemeColors, CursorStyle } from '../types'
+import {
+  encodeX10Wheel,
+  isAllMouseModes,
+  stripMouseTracking,
+  WHEEL_DOWN,
+  WHEEL_UP
+} from '../../../shared/mouse'
 
 interface Props {
   session: SessionMeta
@@ -115,6 +122,24 @@ export function TerminalView({
     })
     term.open(host)
 
+    // Keep xterm out of mouse-reporting mode, so a drag is xterm-native text
+    // selection (purple, sticky, ⌘C copies) instead of being forwarded to the
+    // pty as a mouse event.
+    //
+    // We used to do this by regex-stripping the DECSETs out of each PTY chunk
+    // (see stripMouseTracking, still there as a cheap first pass). That is not
+    // reliable on its own: PTY data arrives in arbitrary chunks, so a chunk
+    // boundary landing inside `\x1b[?1000h` makes the regex miss it, xterm
+    // enters mouse mode, and selection — and therefore copy — is dead until a
+    // matching reset happens to arrive un-split. That is the intermittent
+    // "sometimes I can't copy at all".
+    //
+    // Registering with the parser fixes it properly: xterm reassembles split
+    // sequences internally before dispatching, and a handler returning `true`
+    // consumes the sequence before xterm's own DECSET handler runs.
+    term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, isAllMouseModes)
+    term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, isAllMouseModes)
+
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true
 
@@ -146,7 +171,7 @@ export function TerminalView({
         ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'c'
       if (isCmdC) {
         const sel = term.getSelection()
-        if (sel) navigator.clipboard.writeText(sel).catch(() => undefined)
+        if (sel) copyToClipboard(sel)
         return false
       }
 
@@ -277,11 +302,7 @@ export function TerminalView({
       let seq = ''
       while (Math.abs(wheelAccum) >= threshold) {
         const dir = wheelAccum < 0 ? -1 : 1
-        const code = dir < 0 ? 64 : 65
-        const btn = String.fromCharCode(code + 32)
-        const x = String.fromCharCode(cell.x + 32)
-        const y = String.fromCharCode(cell.y + 32)
-        seq += `\x1b[M${btn}${x}${y}`
+        seq += encodeX10Wheel(dir < 0 ? WHEEL_UP : WHEEL_DOWN, cell.x, cell.y)
         if (dir < 0) {
           scrollDepthRef.current += 1
           inCopyModeRef.current = true
@@ -292,7 +313,13 @@ export function TerminalView({
         wheelAccum -= dir * threshold
       }
       if (seq) {
-        window.api.writeSession(session.id, seq)
+        // writeSessionBytes, NOT writeSession: an X10 report encodes each
+        // coordinate as `cell + 32`, so from column 96 onward the byte goes
+        // above 0x7F. Sent as a string it would be UTF-8 encoded into two
+        // bytes, tmux would fail to parse the report, and the stray byte would
+        // be typed into the pane as a literal character — one per wheel notch,
+        // always the same character for a given pointer column.
+        window.api.writeSessionBytes(session.id, seq)
         syncCopyModeFromTmux()
       }
       return false
@@ -839,10 +866,16 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
   )
 }
 
-const MOUSE_TRACKING_RE = /\x1b\[\?(?:1000|1001|1002|1003|1004|1005|1006|1015)[hl]/g
-
-function stripMouseTracking(data: string): string {
-  return data.replace(MOUSE_TRACKING_RE, '')
+/**
+ * Put text on the clipboard, preferring the async DOM API and falling back to
+ * Electron's clipboard when it rejects (it requires the document to be the
+ * focused context, which isn't guaranteed — that rejection was swallowed and
+ * showed up as "⌘C did nothing").
+ */
+function copyToClipboard(text: string): void {
+  navigator.clipboard
+    .writeText(text)
+    .catch(() => window.api.writeClipboard(text).catch(() => undefined))
 }
 
 /**

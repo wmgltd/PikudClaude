@@ -30,6 +30,7 @@ import {
   savePromptStats
 } from './store'
 import { watchConversation } from './conversation'
+import { getMemoryPressure, startMemoryPressureSampling } from './systemHealth'
 import {
   recordPromptSent,
   recordStatusChange,
@@ -38,7 +39,8 @@ import {
   recordBookmarkCreated,
   getSummary,
   getHeatmap,
-  getProjectDetail
+  getProjectDetail,
+  compactEventsLog
 } from './stats'
 import type { CreateSessionOpts, ImportSessionOpts } from './types'
 
@@ -52,6 +54,31 @@ const updatesConfigured = (): boolean =>
 
 app.setName('PikudClaude')
 app.setPath('userData', join(app.getPath('appData'), 'pikudclaude'))
+
+// A second instance is never what the user wants and is actively destructive
+// here: both copies share one userData directory (Chromium's own singleton then
+// makes one of them exit with no explanation) and both attach tmux clients to
+// the same sessions, so the smaller window's size wins and every pane gets
+// resized under the user. Hand the launch over to the window that already
+// exists instead.
+//
+// Must run before app.whenReady() — requestSingleInstanceLock is what tells the
+// first instance to fire 'second-instance', and losing the lock has to quit
+// before any window or tmux attachment is created.
+const gotInstanceLock = app.requestSingleInstanceLock()
+if (!gotInstanceLock) {
+  // quit() is asynchronous, so module evaluation continues and whenReady would
+  // still fire — every path below that could create a window or touch tmux is
+  // gated on gotInstanceLock as well.
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+}
 
 // Wire crash dumps + uncaught-error capture as early as possible so we catch
 // init-time crashes too.
@@ -178,6 +205,12 @@ function wireIpc(): void {
     manager.write(id, data)
   })
 
+  // Byte-exact write. Only the wheel handler uses it — X10 mouse reports must
+  // reach tmux as single bytes, not UTF-8-encoded code points.
+  ipcMain.handle('tmux:write-binary', (_e, id: string, data: string) => {
+    manager.writeBinary(id, data)
+  })
+
   ipcMain.handle('tmux:in-copy-mode', (_e, id: string): Promise<boolean> =>
     manager instanceof TmuxManager ? manager.isInCopyMode(id) : Promise.resolve(false)
   )
@@ -204,6 +237,8 @@ function wireIpc(): void {
   })
 
   ipcMain.handle('tmux:get-statuses', () => manager.getStatuses())
+
+  ipcMain.handle('tmux:get-vitals', () => manager.getVitals())
 
   ipcMain.handle('tmux:capture-live', (_e, id: string) => manager.captureLive(id))
 
@@ -367,6 +402,11 @@ function wireIpc(): void {
 
   ipcMain.handle('usage:get-active-block', () => getActiveBlock())
 
+  // Read by the stall banner so a frozen UI can name its own cause: a Mac deep
+  // into swap stalls every app on it, and that is worth distinguishing from
+  // PikudClaude being slow on its own.
+  ipcMain.handle('system:get-memory-pressure', () => getMemoryPressure())
+
   ipcMain.handle('git:get-branch', async (_e, cwd: string) => {
     if (!cwd) return null
     const { execFile } = await import('node:child_process')
@@ -405,6 +445,14 @@ function wireIpc(): void {
     if (isDev) return
     autoUpdater.allowPrerelease = channel === 'beta'
     autoUpdater.channel = channel === 'beta' ? 'beta' : 'latest'
+  })
+
+  // navigator.clipboard.writeText rejects whenever the document isn't the
+  // focused context (an overlay stealing focus, the window mid-activation, a
+  // devtools pane). ⌘C silently did nothing in those cases. Electron's
+  // clipboard has no focus requirement, so the renderer falls back to this.
+  ipcMain.handle('app:clipboard-write', (_e, text: string) => {
+    clipboard.writeText(text)
   })
 
   ipcMain.handle('app:get-version', () => app.getVersion())
@@ -627,6 +675,7 @@ function buildAppMenu(): void {
 }
 
 app.whenReady().then(async () => {
+  if (!gotInstanceLock) return
   if (process.platform === 'darwin' && existsSync(ICON_PATH)) {
     try {
       app.dock?.setIcon(nativeImage.createFromPath(ICON_PATH))
@@ -634,6 +683,9 @@ app.whenReady().then(async () => {
       /* ignore */
     }
   }
+  // Age out old analytics before anything reads them. Once per launch only —
+  // it rewrites the file synchronously.
+  compactEventsLog()
   await manager.init()
   wireIpc()
   await createWindow()
@@ -651,6 +703,12 @@ app.whenReady().then(async () => {
   }
   powerMonitor.on('resume', handleResume)
   powerMonitor.on('unlock-screen', handleResume)
+
+  startMemoryPressureSampling((p) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('system:memory-pressure', p)
+    }
+  })
 
   if (updatesConfigured()) {
     autoUpdater.autoDownload = true
