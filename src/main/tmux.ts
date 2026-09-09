@@ -139,7 +139,6 @@ export class TmuxManager extends EventEmitter {
   // is coarse and only meaningful as a change detector.
   private lastWindowActivity = new Map<string, number>()
   private activityChangedAt = new Map<string, number>()
-  private needsRedrawOnAttach = new Set<string>()
   private resurrecting = new Map<string, Promise<void>>()
   private attaching = new Map<string, Promise<void>>()
   private globalBindingsApplied = false
@@ -246,7 +245,6 @@ export class TmuxManager extends EventEmitter {
         s.tmuxName = s.tmuxName ?? nativeTmuxName(s.id)
         if (await tmuxSessionExistsByName(s.tmuxName)) {
           s.dead = false
-          this.needsRedrawOnAttach.add(s.id)
         } else {
           // tmux server was killed (e.g. Mac reboot) — keep the metadata so the
           // user doesn't lose their project list. attach() will resurrect on demand.
@@ -337,7 +335,6 @@ export class TmuxManager extends EventEmitter {
       await tmux('send-keys', '-t', s.tmuxName, startCommand, 'Enter')
     }
     s.dead = false
-    this.needsRedrawOnAttach.add(s.id)
     saveSessions(this.sessions)
   }
 
@@ -876,19 +873,22 @@ export class TmuxManager extends EventEmitter {
       this.emit('exit', id)
     })
     this.attached.set(id, { pty: p, cols, rows })
-    if (this.needsRedrawOnAttach.has(id)) {
-      this.needsRedrawOnAttach.delete(id)
-      setTimeout(() => {
-        const a = this.attached.get(id)
-        if (a) {
-          try {
-            a.pty.write('\x0c')
-          } catch {
-            /* ignore */
-          }
+    // Kick a redraw on EVERY attach, not only restored/resurrected sessions.
+    // tmux's own attach-time repaint can land before the renderer's data
+    // subscription is wired, leaving the terminal black until the next
+    // output — LRU-evicted sessions re-attached on revisit hit this
+    // constantly ("paints only after I press a key"). Ctrl+L makes the pane
+    // app repaint once the pipeline is definitely listening.
+    setTimeout(() => {
+      const a = this.attached.get(id)
+      if (a) {
+        try {
+          a.pty.write('\x0c')
+        } catch {
+          /* ignore */
         }
-      }, 300)
-    }
+      }
+    }, 300)
   }
 
   async detach(id: string): Promise<void> {
