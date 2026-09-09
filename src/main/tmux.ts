@@ -141,6 +141,7 @@ export class TmuxManager extends EventEmitter {
   private activityChangedAt = new Map<string, number>()
   private resurrecting = new Map<string, Promise<void>>()
   private attaching = new Map<string, Promise<void>>()
+  private refreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private globalBindingsApplied = false
   private async ensureMouseAndClipboard(tmuxName: string): Promise<void> {
     try {
@@ -967,6 +968,39 @@ export class TmuxManager extends EventEmitter {
       a.rows = rows
     } catch {
       /* ignore resize on dead pty */
+      return
+    }
+    // A resize round-trip (conversation panel open→close: 142→98→142) can
+    // desync xterm from tmux: each term.resize wipes/rewraps xterm's buffer,
+    // while tmux only resends what it considers damaged for the sizes it saw
+    // — the screen can end up black with the pane content fully intact until
+    // the pane app happens to repaint (historically: the user pressing a
+    // key). Once a resize burst settles, force tmux to resend the FULL
+    // screen to our client; protocol-level, app-agnostic, injects no keys.
+    const pending = this.refreshTimers.get(id)
+    if (pending) clearTimeout(pending)
+    this.refreshTimers.set(
+      id,
+      setTimeout(() => {
+        this.refreshTimers.delete(id)
+        void this.forceFullRedraw(id)
+      }, 350)
+    )
+  }
+
+  private async forceFullRedraw(id: string): Promise<void> {
+    const s = this.getSession(id)
+    if (!s || !this.attached.has(id)) return
+    try {
+      const ttys = (await tmux('list-clients', '-t', s.tmuxName, '-F', '#{client_tty}'))
+        .split('\n')
+        .map((t) => t.trim())
+        .filter(Boolean)
+      for (const tty of ttys) {
+        await tmux('refresh-client', '-t', tty)
+      }
+    } catch {
+      /* session or client gone — nothing to refresh */
     }
   }
 
