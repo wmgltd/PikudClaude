@@ -437,6 +437,21 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
         }
       })
       const dims = fit.proposeDimensions() ?? { cols: 100, rows: 30 }
+      // Register the data listener BEFORE attaching. tmux dumps the whole
+      // screen to a new client moments after the pty spawns, and doAttach
+      // keeps awaiting AFTER the spawn — so the dump can reach main (and be
+      // forwarded) while the renderer is still parked on this await. With
+      // the listener registered afterwards, that dump vanished and the
+      // terminal stayed black until the pane's next output (a keypress).
+      unsubRef.current = window.api.onSessionData((id, data) => {
+        // Strip mouse-tracking DECSETs (1000/1002/1006 etc.) so xterm stays
+        // out of mouse mode. That way drag = xterm-native text selection
+        // (purple, sticky, ⌘C copies) — like macOS Terminal / iTerm. For
+        // selecting content that scrolled off-screen, use the ⌘⇧C overlay.
+        // The wheel handler below still passes wheel events to tmux as X10
+        // codes manually so scrolling still enters tmux's copy-mode.
+        if (id === session.id) term.write(stripMouseTracking(data))
+      })
       await window.api.attachSession(session.id, dims.cols, dims.rows)
       if (cancelled) return
       // Reconcile copy-mode once on (re)attach: the pane's tmux copy-mode
@@ -450,15 +465,6 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
           if (!cancelled) inCopyModeRef.current = on
         })
         .catch(() => undefined)
-      unsubRef.current = window.api.onSessionData((id, data) => {
-        // Strip mouse-tracking DECSETs (1000/1002/1006 etc.) so xterm stays
-        // out of mouse mode. That way drag = xterm-native text selection
-        // (purple, sticky, ⌘C copies) — like macOS Terminal / iTerm. For
-        // selecting content that scrolled off-screen, use the ⌘⇧C overlay.
-        // The wheel handler below still passes wheel events to tmux as X10
-        // codes manually so scrolling still enters tmux's copy-mode.
-        if (id === session.id) term.write(stripMouseTracking(data))
-      })
       // Mirror what the user is currently typing into the input line. We
       // tap term.onData (the same channel that writes to the pty) so the
       // buffer is independent of how Claude's TUI renders — works in any
