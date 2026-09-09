@@ -914,8 +914,9 @@ function setupBidiObserver(host: HTMLElement, isActive: () => boolean): BidiObse
   // rowNeedsRtl, which refuses to flip positional layouts (frames, split
   // panes) — see shared/bidi.ts.
   const XTERM_BG_CLASS_RE = /(?:^|\s)xterm-bg-(\d+)(?:\s|$)/
-  const desiredRtl = (row: Element): boolean => {
+  const analyzeRow = (row: Element): { rtl: boolean; hasBg: boolean } => {
     const spans: RowSpan[] = []
+    let hasBg = false
     row.childNodes.forEach((n) => {
       const text = n.textContent || ''
       if (!(n instanceof HTMLElement)) {
@@ -923,9 +924,11 @@ function setupBidiObserver(host: HTMLElement, isActive: () => boolean): BidiObse
         return
       }
       const cls = XTERM_BG_CLASS_RE.exec(n.className)
-      spans.push({ text, bg: cls ? `p${cls[1]}` : n.style.backgroundColor || '' })
+      const bg = cls ? `p${cls[1]}` : n.style.backgroundColor || ''
+      if (bg) hasBg = true
+      spans.push({ text, bg })
     })
-    return rowNeedsRtl(spans)
+    return { rtl: rowNeedsRtl(spans), hasBg }
   }
 
   // Two-phase debounce: each mutation updates a "pending" desired state. We
@@ -948,6 +951,12 @@ function setupBidiObserver(host: HTMLElement, isActive: () => boolean): BidiObse
   //   • Removing requires QUIET_MS of stability — prevents flicker when a
   //     row's Hebrew content transiently disappears (spinner blank frame,
   //     scroll-induced cell churn, screen-clear repaint, etc).
+  //   • EXCEPTION: a row carrying any background-colored span also waits for
+  //     QUIET_MS before ADDING. In split layouts (Claude Code's /diff) the
+  //     chat text can hit the DOM a frame before the panel's background run
+  //     does; flipping in that gap throws the panel's gray block across the
+  //     screen for 250ms+ on every streamed row. Rows with no backgrounds —
+  //     the plain-chat common case — keep the first-frame flip.
   const tickAllRows = (): void => {
     // Only the visible (active) terminal needs live RTL tagging. Every visited
     // session stays mounted (App keeps them for fast switching), so without
@@ -960,7 +969,7 @@ function setupBidiObserver(host: HTMLElement, isActive: () => boolean): BidiObse
     const now = Date.now()
     rowsEl.childNodes.forEach((n) => {
       if (!(n instanceof Element)) return
-      const want = desiredRtl(n)
+      const { rtl: want, hasBg } = analyzeRow(n)
       const cur = n.classList.contains('rtl-row')
       let state = rowStates.get(n)
       if (!state) {
@@ -971,7 +980,7 @@ function setupBidiObserver(host: HTMLElement, isActive: () => boolean): BidiObse
         state.desired = want
         state.lastChangeTs = now
       }
-      if (want && !cur) {
+      if (want && !cur && (!hasBg || now - state.lastChangeTs >= QUIET_MS)) {
         n.classList.add('rtl-row')
       } else if (!want && cur && now - state.lastChangeTs >= QUIET_MS) {
         n.classList.remove('rtl-row')
