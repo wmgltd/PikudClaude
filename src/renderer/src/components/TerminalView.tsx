@@ -12,7 +12,7 @@ import {
   WHEEL_DOWN,
   WHEEL_UP
 } from '../../../shared/mouse'
-import { rowNeedsRtl } from '../../../shared/bidi'
+import { rowNeedsRtl, type RowSpan } from '../../../shared/bidi'
 
 interface Props {
   session: SessionMeta
@@ -909,11 +909,23 @@ interface BidiObserver {
 function setupBidiObserver(host: HTMLElement, isActive: () => boolean): BidiObserver | null {
   // Compute the desired class for a row right now, without applying it.
   // Use textContent (NOT innerText): innerText forces a synchronous reflow on
-  // every read, and this runs over every row on each tick + mutation. For
-  // deciding the row's direction, the raw character content is all we need,
-  // and textContent reads it without touching layout.
+  // every read, and this runs over every row on each tick + mutation. Reading
+  // className / style.backgroundColor is likewise layout-free. The spans feed
+  // rowNeedsRtl, which refuses to flip positional layouts (frames, split
+  // panes) — see shared/bidi.ts.
+  const XTERM_BG_CLASS_RE = /(?:^|\s)xterm-bg-(\d+)(?:\s|$)/
   const desiredRtl = (row: Element): boolean => {
-    return rowNeedsRtl(row.textContent || '')
+    const spans: RowSpan[] = []
+    row.childNodes.forEach((n) => {
+      const text = n.textContent || ''
+      if (!(n instanceof HTMLElement)) {
+        spans.push({ text, bg: '' })
+        return
+      }
+      const cls = XTERM_BG_CLASS_RE.exec(n.className)
+      spans.push({ text, bg: cls ? `p${cls[1]}` : n.style.backgroundColor || '' })
+    })
+    return rowNeedsRtl(spans)
   }
 
   // Two-phase debounce: each mutation updates a "pending" desired state. We
