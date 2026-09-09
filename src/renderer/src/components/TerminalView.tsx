@@ -431,14 +431,24 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
 
     let cancelled = false
     const init = async () => {
-      requestAnimationFrame(() => {
-        try {
-          fit.fit()
-        } catch {
-          /* noop */
-        }
-      })
-      const dims = fit.proposeDimensions() ?? { cols: 100, rows: 30 }
+      // Fit SYNCHRONOUSLY before attaching, and attach at the grid xterm
+      // actually has. The old shape — rAF'd fit + attach at
+      // proposeDimensions() — opened a window where the tmux attach dump
+      // (sized for the proposed cols/rows) landed on a still-default 80x24
+      // grid: rows clamped, content mangled, and when the late fit resized
+      // to the very size tmux already believed the client had, no SIGWINCH
+      // fired and tmux never resent — a black/garbled terminal that only a
+      // pane-app repaint (a keypress) healed. Under memory pressure the rAF
+      // reliably lost that race. Attaching at term.cols/rows makes the grid
+      // match by construction; any LATER fit that changes size triggers a
+      // real resize → tmux redraws → still consistent.
+      try {
+        fit.fit()
+      } catch {
+        /* host not laid out yet — attach at the current grid; the resize
+           path corrects it and tmux redraws on the size change */
+      }
+      const dims = { cols: term.cols, rows: term.rows }
       // Register the data listener BEFORE attaching. tmux dumps the whole
       // screen to a new client moments after the pty spawns, and doAttach
       // keeps awaiting AFTER the spawn — so the dump can reach main (and be
