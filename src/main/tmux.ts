@@ -17,6 +17,12 @@ import { appendErrorEntry } from './errorLog'
 import { resolveClaudeSessionId } from './conversation'
 import { detectAwaiting, isShellCommand, pickRotation } from '../shared/paneState'
 import type { SessionVitals } from '../shared/vitals'
+import {
+  countNonEmptyLines,
+  isScreenDesynced,
+  DESYNC_STREAK_TO_ACT,
+  type ScreenCheckResult
+} from '../shared/screenSync'
 
 const execFileAsync = promisify(execFile)
 
@@ -142,6 +148,8 @@ export class TmuxManager extends EventEmitter {
   private resurrecting = new Map<string, Promise<void>>()
   private attaching = new Map<string, Promise<void>>()
   private refreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  // Consecutive screen-desync samples per session (see screenCheck).
+  private desyncStreaks = new Map<string, number>()
   private globalBindingsApplied = false
   private async ensureMouseAndClipboard(tmuxName: string): Promise<void> {
     try {
@@ -836,6 +844,7 @@ export class TmuxManager extends EventEmitter {
     // Also clear the data window so any stale samples from a prior attach
     // don't get blended with the new attach's bytes.
     this.dataWindow.delete(id)
+    this.desyncStreaks.delete(id)
     const p = pty.spawn(
       resolveTmuxBin(),
       ['-u', 'attach-session', '-t', s.tmuxName],
@@ -922,6 +931,7 @@ export class TmuxManager extends EventEmitter {
     this.attached.delete(id)
     this.attachedAt.delete(id)
     this.dataWindow.delete(id)
+    this.desyncStreaks.delete(id)
     appendErrorEntry({
       source: 'main',
       kind: 'debug:detach',
@@ -1001,12 +1011,12 @@ export class TmuxManager extends EventEmitter {
       id,
       setTimeout(() => {
         this.refreshTimers.delete(id)
-        void this.forceFullRedraw(id)
+        void this.forceFullRedraw(id, 'resize-settled')
       }, 350)
     )
   }
 
-  private async forceFullRedraw(id: string): Promise<void> {
+  private async forceFullRedraw(id: string, reason: string): Promise<void> {
     const s = this.getSession(id)
     if (!s || !this.attached.has(id)) return
     try {
@@ -1020,11 +1030,95 @@ export class TmuxManager extends EventEmitter {
       appendErrorEntry({
         source: 'main',
         kind: 'debug:refresh-client',
-        message: `forced full redraw for ${id} (${ttys.length} client(s))`,
-        context: { id, ttys }
+        message: `forced full redraw for ${id} (${ttys.length} client(s), ${reason})`,
+        context: { id, ttys, reason }
       })
     } catch {
       /* session or client gone — nothing to refresh */
+    }
+  }
+
+  /**
+   * Screen-sync check, driven by the renderer every few seconds for the
+   * visible terminal. It sends how many non-empty rows xterm shows; we count
+   * the pane's and judge the gap with shared/screenSync. tmux only resends
+   * cells it believes changed, so once xterm's grid loses content tmux did
+   * not see, the terminal stays black over an intact pane until the pane app
+   * happens to repaint (historically: a keypress). Two consecutive hits
+   * force the same protocol-level refresh-client the resize path uses —
+   * no keys injected — and every transition is logged together with the
+   * renderer's DOM-side context, so an occurrence names its failure mode.
+   */
+  async screenCheck(
+    id: string,
+    xtermNonEmpty: number,
+    context: Record<string, unknown>
+  ): Promise<ScreenCheckResult | null> {
+    const s = this.getSession(id)
+    if (!s || !this.attached.has(id)) return null
+    let inMode = false
+    let alternateOn: string | null = null
+    let paneHeight: string | null = null
+    try {
+      const out = await tmux(
+        'display-message', '-p', '-t', s.tmuxName,
+        '#{pane_in_mode}\t#{alternate_on}\t#{pane_height}'
+      )
+      const [m, a, h] = out.trim().split('\t')
+      inMode = m === '1'
+      alternateOn = a ?? null
+      paneHeight = h ?? null
+    } catch {
+      return null
+    }
+    if (inMode) {
+      // Copy-mode shows history, not the pane screen — nothing to compare.
+      this.desyncStreaks.delete(id)
+      return { paneNonEmpty: -1, desynced: false, streak: 0, forced: false, skipped: 'copy-mode' }
+    }
+    const paneNonEmpty = countNonEmptyLines(await this.capturePaneScreen(s.tmuxName))
+    const desynced = isScreenDesynced(xtermNonEmpty, paneNonEmpty)
+    const prev = this.desyncStreaks.get(id) ?? 0
+    const base = { id, xtermNonEmpty, paneNonEmpty, alternateOn, paneHeight, ...context }
+    if (!desynced) {
+      if (prev > 0) {
+        this.desyncStreaks.delete(id)
+        appendErrorEntry({
+          source: 'main',
+          kind: 'debug:screen-desync-cleared',
+          message: `screen back in sync for ${id} after ${prev} sample(s)`,
+          context: { ...base, lastedSamples: prev }
+        })
+      }
+      return { paneNonEmpty, desynced: false, streak: 0, forced: false }
+    }
+    const streak = prev + 1
+    this.desyncStreaks.set(id, streak)
+    // Force on the second hit, then retry every sixth sample (~30s) while it
+    // persists — a heal that does not take is itself the evidence we want.
+    const forced =
+      streak === DESYNC_STREAK_TO_ACT || (streak > DESYNC_STREAK_TO_ACT && streak % 6 === 0)
+    if (streak <= 3 || streak % 6 === 0) {
+      appendErrorEntry({
+        source: 'main',
+        kind: 'debug:screen-desync',
+        message: `xterm shows ${xtermNonEmpty} non-empty rows, pane has ${paneNonEmpty} (${id}, sample ${streak}${forced ? ', forcing redraw' : ''})`,
+        context: { ...base, streak, forced }
+      })
+    }
+    if (forced) await this.forceFullRedraw(id, `screen-desync#${streak}`)
+    return { paneNonEmpty, desynced: true, streak, forced }
+  }
+
+  /** The pane's visible screen only (no scrollback), or '' if it is gone. */
+  private async capturePaneScreen(tmuxName: string): Promise<string> {
+    try {
+      const { stdout } = await execFileAsync(resolveTmuxBin(), [
+        '-u', 'capture-pane', '-t', tmuxName, '-p'
+      ])
+      return stdout
+    } catch {
+      return ''
     }
   }
 

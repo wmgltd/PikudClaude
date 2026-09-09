@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { Settings } from '../shared/settings'
 import type { ActiveUsageBlock } from '../shared/usage'
 import type { SessionVitals } from '../shared/vitals'
+import type { ScreenCheckResult } from '../shared/screenSync'
 import type { IpcRendererEvent } from 'electron'
 
 interface SessionMeta {
@@ -77,6 +78,15 @@ const api = {
   // Used for X10 mouse reports, which break if UTF-8 encoded.
   writeSessionBytes: (id: string, data: string): Promise<void> =>
     ipcRenderer.invoke('tmux:write-binary', id, data),
+  // Screen-sync sample for the visible terminal: xterm's non-empty row
+  // count plus DOM-side context; main compares against the tmux pane and
+  // forces a redraw when they disagree. See TmuxManager.screenCheck.
+  screenCheck: (
+    id: string,
+    xtermNonEmpty: number,
+    context: Record<string, unknown>
+  ): Promise<ScreenCheckResult | null> =>
+    ipcRenderer.invoke('tmux:screen-check', id, xtermNonEmpty, context),
   isInCopyMode: (id: string): Promise<boolean> =>
     ipcRenderer.invoke('tmux:in-copy-mode', id),
   sendText: (id: string, text: string): Promise<void> =>

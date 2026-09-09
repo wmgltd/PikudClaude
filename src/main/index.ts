@@ -215,6 +215,14 @@ function wireIpc(): void {
     manager instanceof TmuxManager ? manager.isInCopyMode(id) : Promise.resolve(false)
   )
 
+  ipcMain.handle(
+    'tmux:screen-check',
+    (_e, id: string, xtermNonEmpty: number, context: Record<string, unknown>) =>
+      manager instanceof TmuxManager
+        ? manager.screenCheck(id, xtermNonEmpty, context)
+        : Promise.resolve(null)
+  )
+
   ipcMain.handle('tmux:send-text', async (_e, id: string, text: string) => {
     await manager.sendText(id, text)
     recordPromptSent(id, cwdOf(id), text)

@@ -12,7 +12,7 @@ import {
   WHEEL_DOWN,
   WHEEL_UP
 } from '../../../shared/mouse'
-import { rowNeedsRtl, type RowSpan } from '../../../shared/bidi'
+import { HEBREW_CHAR_RE, rowNeedsRtl, type RowSpan } from '../../../shared/bidi'
 
 interface Props {
   session: SessionMeta
@@ -65,7 +65,6 @@ export function TerminalView({
   const unsubRef = useRef<(() => void) | null>(null)
   const savedScrollLineRef = useRef<number | null>(null)
   const lastDataTsRef = useRef(0)
-  const lastBlackLogTsRef = useRef(0)
   const bidiObserverRef = useRef<BidiObserver | null>(null)
   const activeRef = useRef(active)
   const preferredIDERef = useRef(preferredIDE)
@@ -747,40 +746,53 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
         ro.observe(host)
       }
       term.focus()
-      // Black-screen detector (diagnostic): sample the ACTIVE terminal every
-      // 5s; if the visible screen is near-empty, log the full xterm state so
-      // a real occurrence tells us WHICH failure mode this is — normal-buffer
-      // fallback (alt-screen exited), a parked viewport, or no data arriving.
-      // Rate-limited; must never break the terminal.
+      // Screen-sync check: every 5s compare what xterm shows with what the
+      // tmux pane holds. tmux resends only cells it believes changed, so once
+      // xterm's grid loses content tmux did not see, the terminal stays black
+      // over an intact pane until the pane app happens to repaint
+      // (historically: a keypress). Main counts the pane's non-empty rows,
+      // judges the gap (shared/screenSync), forces a protocol-level
+      // refresh-client after two consecutive hits, and logs every step with
+      // the DOM-side state sampled here — so the next occurrence names its
+      // failure mode. Must never break the terminal.
       const detector = window.setInterval(() => {
         try {
+          if (document.hidden || inCopyModeRef.current) return
           const buf = term.buffer.active
-          let nonEmpty = 0
+          let xtermNonEmpty = 0
           for (let r = 0; r < term.rows; r++) {
             const line = buf.getLine(buf.viewportY + r)
-            if (line && line.translateToString(true).trim().length > 0) nonEmpty++
+            if (line && line.translateToString(true).trim().length > 0) xtermNonEmpty++
           }
-          if (nonEmpty <= 2 && Date.now() - lastBlackLogTsRef.current > 30_000) {
-            lastBlackLogTsRef.current = Date.now()
-            window.api
-              .logRendererError({
-                kind: 'debug:black-detect',
-                message: `active terminal near-empty: ${nonEmpty} non-empty rows`,
-                context: {
-                  sessionId: session.id,
-                  bufferType: buf.type,
-                  viewportY: buf.viewportY,
-                  baseY: buf.baseY,
-                  bufferLength: buf.length,
-                  cols: term.cols,
-                  rows: term.rows,
-                  msSinceLastData: lastDataTsRef.current
-                    ? Date.now() - lastDataTsRef.current
-                    : -1
-                }
-              })
-              .catch(() => undefined)
-          }
+          const host = hostRef.current
+          const rowsEl = host?.querySelector('.xterm-rows') ?? null
+          let domRowsWithText = 0
+          let rtlNoHebrew = 0
+          rowsEl?.childNodes.forEach((n) => {
+            if (!(n instanceof Element)) return
+            const text = n.textContent || ''
+            if (text.trim().length > 0) domRowsWithText++
+            if (n.classList.contains('rtl-row') && !HEBREW_CHAR_RE.test(text)) rtlNoHebrew++
+          })
+          const rect = host?.getBoundingClientRect()
+          window.api
+            .screenCheck(session.id, xtermNonEmpty, {
+              bufferType: buf.type,
+              viewportY: buf.viewportY,
+              baseY: buf.baseY,
+              cols: term.cols,
+              rows: term.rows,
+              msSinceLastData: lastDataTsRef.current ? Date.now() - lastDataTsRef.current : -1,
+              domRowsWithText,
+              rtlNoHebrew,
+              hostConnected: host?.isConnected ?? false,
+              hostW: rect ? Math.round(rect.width) : -1,
+              hostH: rect ? Math.round(rect.height) : -1,
+              wrapHidden: host?.closest('.terminal-wrap')?.classList.contains('hidden') ?? null,
+              visibility: document.visibilityState,
+              focused: document.hasFocus()
+            })
+            .catch(() => undefined)
         } catch {
           /* diagnostics must never break the terminal */
         }
