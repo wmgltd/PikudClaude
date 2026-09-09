@@ -871,9 +871,21 @@ export class TmuxManager extends EventEmitter {
       this.attached.delete(id)
       this.attachedAt.delete(id)
       this.dataWindow.delete(id)
+      appendErrorEntry({
+        source: 'main',
+        kind: 'debug:pty-exit',
+        message: `attach pty for ${id} exited unexpectedly`,
+        context: { id }
+      })
       this.emit('exit', id)
     })
     this.attached.set(id, { pty: p, cols, rows })
+    appendErrorEntry({
+      source: 'main',
+      kind: 'debug:attach',
+      message: `attached ${id} at ${cols}x${rows}`,
+      context: { id, cols, rows }
+    })
     // Kick a redraw on EVERY attach, not only restored/resurrected sessions.
     // tmux's own attach-time repaint can land before the renderer's data
     // subscription is wired, leaving the terminal black until the next
@@ -910,6 +922,12 @@ export class TmuxManager extends EventEmitter {
     this.attached.delete(id)
     this.attachedAt.delete(id)
     this.dataWindow.delete(id)
+    appendErrorEntry({
+      source: 'main',
+      kind: 'debug:detach',
+      message: `detached ${id}`,
+      context: { id }
+    })
     try {
       a.pty.kill()
     } catch {
@@ -999,6 +1017,12 @@ export class TmuxManager extends EventEmitter {
       for (const tty of ttys) {
         await tmux('refresh-client', '-t', tty)
       }
+      appendErrorEntry({
+        source: 'main',
+        kind: 'debug:refresh-client',
+        message: `forced full redraw for ${id} (${ttys.length} client(s))`,
+        context: { id, ttys }
+      })
     } catch {
       /* session or client gone — nothing to refresh */
     }

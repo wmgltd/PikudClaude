@@ -64,6 +64,8 @@ export function TerminalView({
   const searchInputRef = useRef<HTMLInputElement>(null)
   const unsubRef = useRef<(() => void) | null>(null)
   const savedScrollLineRef = useRef<number | null>(null)
+  const lastDataTsRef = useRef(0)
+  const lastBlackLogTsRef = useRef(0)
   const bidiObserverRef = useRef<BidiObserver | null>(null)
   const activeRef = useRef(active)
   const preferredIDERef = useRef(preferredIDE)
@@ -450,7 +452,10 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
         // selecting content that scrolled off-screen, use the ⌘⇧C overlay.
         // The wheel handler below still passes wheel events to tmux as X10
         // codes manually so scrolling still enters tmux's copy-mode.
-        if (id === session.id) term.write(stripMouseTracking(data))
+        if (id === session.id) {
+          lastDataTsRef.current = Date.now()
+          term.write(stripMouseTracking(data))
+        }
       })
       await window.api.attachSession(session.id, dims.cols, dims.rows)
       if (cancelled) return
@@ -732,9 +737,48 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
         ro.observe(host)
       }
       term.focus()
+      // Black-screen detector (diagnostic): sample the ACTIVE terminal every
+      // 5s; if the visible screen is near-empty, log the full xterm state so
+      // a real occurrence tells us WHICH failure mode this is — normal-buffer
+      // fallback (alt-screen exited), a parked viewport, or no data arriving.
+      // Rate-limited; must never break the terminal.
+      const detector = window.setInterval(() => {
+        try {
+          const buf = term.buffer.active
+          let nonEmpty = 0
+          for (let r = 0; r < term.rows; r++) {
+            const line = buf.getLine(buf.viewportY + r)
+            if (line && line.translateToString(true).trim().length > 0) nonEmpty++
+          }
+          if (nonEmpty <= 2 && Date.now() - lastBlackLogTsRef.current > 30_000) {
+            lastBlackLogTsRef.current = Date.now()
+            window.api
+              .logRendererError({
+                kind: 'debug:black-detect',
+                message: `active terminal near-empty: ${nonEmpty} non-empty rows`,
+                context: {
+                  sessionId: session.id,
+                  bufferType: buf.type,
+                  viewportY: buf.viewportY,
+                  baseY: buf.baseY,
+                  bufferLength: buf.length,
+                  cols: term.cols,
+                  rows: term.rows,
+                  msSinceLastData: lastDataTsRef.current
+                    ? Date.now() - lastDataTsRef.current
+                    : -1
+                }
+              })
+              .catch(() => undefined)
+          }
+        } catch {
+          /* diagnostics must never break the terminal */
+        }
+      }, 5000)
       return () => {
         window.removeEventListener('resize', onResize)
         ro?.disconnect()
+        window.clearInterval(detector)
       }
     }
     try {
