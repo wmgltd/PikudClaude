@@ -895,21 +895,19 @@ export class TmuxManager extends EventEmitter {
       message: `attached ${id} at ${cols}x${rows}`,
       context: { id, cols, rows }
     })
-    // Kick a redraw on EVERY attach, not only restored/resurrected sessions.
-    // tmux's own attach-time repaint can land before the renderer's data
-    // subscription is wired, leaving the terminal black until the next
-    // output — LRU-evicted sessions re-attached on revisit hit this
-    // constantly ("paints only after I press a key"). Ctrl+L makes the pane
-    // app repaint once the pipeline is definitely listening.
+    // Kick a redraw on EVERY attach — at the tmux protocol level, never by
+    // injecting keys. This used to write Ctrl+L to the pty so the pane app
+    // would repaint once the renderer was surely listening. Claude Code
+    // ≥ 2.1.260 changed Ctrl+L in fullscreen mode to CLEAR the transcript
+    // view (like `clear`), so every attach — LRU revisit, relaunch, new
+    // session — blanked the conversation down to the input box until the
+    // next output: the "black screen that heals when I type" (verified by
+    // sending C-l to an idle pane: 31 non-empty rows → 5). refresh-client
+    // makes tmux resend the whole screen from its own model and touches
+    // nothing inside the pane. The ordering bug the kick papered over was
+    // fixed in 84ce7fb/b76ab86, so this is a safety net, not load-bearing.
     setTimeout(() => {
-      const a = this.attached.get(id)
-      if (a) {
-        try {
-          a.pty.write('\x0c')
-        } catch {
-          /* ignore */
-        }
-      }
+      void this.forceFullRedraw(id, 'attach-kick')
     }, 300)
   }
 

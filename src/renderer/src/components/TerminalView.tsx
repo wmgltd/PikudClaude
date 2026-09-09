@@ -556,6 +556,18 @@ const LINK_RE = /([\w./~-]*[\w-][\w/-]*\.[a-zA-Z][a-zA-Z0-9]{0,7}):(\d+)(?::(\d+
         }
       }
       term.onData((data) => {
+        // Diagnostic: Claude Code ≥ 2.1.260 clears its fullscreen transcript
+        // on Ctrl+L, which reads as a "black screen". Log the keypress (no
+        // other content) so a report can be matched against it.
+        if (data === '\x0c') {
+          window.api
+            .logRendererError({
+              kind: 'debug:user-ctrl-l',
+              message: 'user pressed Ctrl+L (clears the fullscreen transcript in Claude Code ≥ 2.1.260)',
+              context: { sessionId: session.id }
+            })
+            .catch(() => undefined)
+        }
         onTypedChunk(data)
         if (inCopyModeRef.current) {
           inCopyModeRef.current = false
