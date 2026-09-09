@@ -13,6 +13,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Refuse to overwrite dist/ under a running copy of the app. Electron reads
+# app.asar lazily, so swapping it beneath a live main process leaves the NEXT
+# window (closing a window on macOS keeps the app alive) reading the wrong
+# archive — a black screen with nothing in error-log.txt. Quit fully first.
+# PACK_FORCE=1 skips the check.
+RUNNING_BIN="$(pwd)/dist/mac-arm64/PikudClaude.app/Contents/MacOS/PikudClaude"
+if [[ "${PACK_FORCE:-}" != "1" ]] && pgrep -f -q -- "$RUNNING_BIN"; then
+  echo "✋ PikudClaude is running from dist/ (pid $(pgrep -f -- "$RUNNING_BIN" | head -1))."
+  echo "   Quit it fully (Cmd+Q — closing the window is not enough), then re-run."
+  echo "   Override with PACK_FORCE=1 if you really mean it."
+  exit 1
+fi
+
 if [[ -f .env.local ]]; then
   set -a
   # shellcheck source=/dev/null
