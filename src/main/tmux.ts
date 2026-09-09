@@ -13,6 +13,7 @@ import type {
   SessionStatus
 } from './types'
 import { loadSessions, saveSessions, loadCachedTmuxPath, saveCachedTmuxPath } from './store'
+import { appendErrorEntry } from './errorLog'
 import { resolveClaudeSessionId } from './conversation'
 import { detectAwaiting, isShellCommand, pickRotation } from '../shared/paneState'
 import type { SessionVitals } from '../shared/vitals'
@@ -255,11 +256,50 @@ export class TmuxManager extends EventEmitter {
     )
     this.sessions = stored
     saveSessions(this.sessions)
+    await this.reapOrphans()
     this.startStatusTimer()
     // Kick off an immediate probe so every restored session has a status
     // ready to display — without this the sidebar would show stale badges
     // until the first awaiting/status tick fires.
     void this.tickAwaiting().then(() => this.tickStatuses())
+  }
+
+  /**
+   * Kill leaked native tmux sessions — ones we created (NATIVE_PREFIX) that are
+   * no longer tracked in sessions.json. They get orphaned by a crash mid-create,
+   * a stranded duplicate-guard, or a store rewrite, and each keeps a live pane
+   * (a `claude` process) holding a PTY. macOS caps PTYs at kern.tty.ptmx_max
+   * (~511); once orphans push the system over that ceiling, `tmux new-session`
+   * fails with "fork failed: Device not configured" / "posix_spawnp failed" and
+   * NO new session can open. Reaping on startup keeps the leak from accumulating.
+   * Never touches imported/external sessions — those don't carry NATIVE_PREFIX.
+   */
+  private async reapOrphans(): Promise<void> {
+    let raw: string
+    try {
+      raw = await tmux('list-sessions', '-F', '#{session_name}')
+    } catch {
+      return // no server or no sessions — nothing to reap
+    }
+    const tracked = new Set(this.sessions.map((s) => s.tmuxName))
+    const orphans = raw
+      .split('\n')
+      .map((n) => n.trim())
+      .filter((n) => n.startsWith(NATIVE_PREFIX) && !tracked.has(n))
+    if (orphans.length === 0) return
+    for (const name of orphans) {
+      try {
+        await tmux('kill-session', '-t', name)
+      } catch {
+        /* already gone — ignore */
+      }
+    }
+    appendErrorEntry({
+      source: 'main',
+      kind: 'tmux:reaped-orphans',
+      message: `reaped ${orphans.length} orphaned tmux session(s)`,
+      context: { orphans }
+    })
   }
 
   private async resurrect(s: SessionMeta): Promise<void> {

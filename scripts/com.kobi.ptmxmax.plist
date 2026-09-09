@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Raises kern.tty.ptmx_max (default ~511) so orphaned tmux panes can't exhaust
+  the system PTY pool. Must run as root, so install as a LaunchDaemon:
+    sudo cp scripts/com.kobi.ptmxmax.plist /Library/LaunchDaemons/
+    sudo launchctl load /Library/LaunchDaemons/com.kobi.ptmxmax.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kobi.ptmxmax</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/sbin/sysctl</string>
+    <string>-w</string>
+    <string>kern.tty.ptmx_max=999</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
