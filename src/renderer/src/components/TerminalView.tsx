@@ -12,6 +12,7 @@ import {
   WHEEL_DOWN,
   WHEEL_UP
 } from '../../../shared/mouse'
+import { rowNeedsRtl } from '../../../shared/bidi'
 
 interface Props {
   session: SessionMeta
@@ -900,8 +901,6 @@ function quotePath(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`
 }
 
-const HEBREW_CHAR_RE = /[֐-׿יִ-ﭏ]/
-
 interface BidiObserver {
   disconnect(): void
   forceRetagNow(): void
@@ -911,11 +910,10 @@ function setupBidiObserver(host: HTMLElement, isActive: () => boolean): BidiObse
   // Compute the desired class for a row right now, without applying it.
   // Use textContent (NOT innerText): innerText forces a synchronous reflow on
   // every read, and this runs over every row on each tick + mutation. For
-  // detecting whether a row contains Hebrew, the raw character content is all
-  // we need, and textContent reads it without touching layout.
+  // deciding the row's direction, the raw character content is all we need,
+  // and textContent reads it without touching layout.
   const desiredRtl = (row: Element): boolean => {
-    const text = row.textContent || ''
-    return HEBREW_CHAR_RE.test(text)
+    return rowNeedsRtl(row.textContent || '')
   }
 
   // Two-phase debounce: each mutation updates a "pending" desired state. We
