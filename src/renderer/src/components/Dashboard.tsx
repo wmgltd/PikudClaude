@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { SessionMeta, SessionStatus } from '../types'
 import { basename } from '../utils/path'
+import { isRtlText } from '../../../shared/bidi'
 
 interface Props {
   sessions: SessionMeta[]
@@ -10,7 +11,6 @@ interface Props {
   onFocus: (id: string) => void
 }
 
-const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
 
 const STATUS_RANK: Record<SessionStatus, number> = {
   awaiting: 0,
@@ -120,7 +120,7 @@ export function Dashboard({
                 <span className="dashboard-card-prompt-icon">↳</span>
                 <span
                   className="dashboard-card-prompt-text"
-                  dir={RTL_RE.test(promptEntry.text) ? 'rtl' : 'ltr'}
+                  dir={isRtlText(promptEntry.text) ? 'rtl' : 'ltr'}
                 >
                   {promptEntry.text}
                 </span>

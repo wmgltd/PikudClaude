@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { SessionMeta, SessionStatus } from '../types'
 import { basename } from '../utils/path'
 import { IS_MAC } from '../utils/platform'
+import { isRtlText as isRtl } from '../../../shared/bidi'
 
 interface Props {
   session: SessionMeta | null
@@ -73,9 +74,6 @@ export function TopBar({
         </button>
       </div>
     )
-  }
-  function isRtl(text: string): boolean {
-    return /[֐-ࣿיִ-﷿ﹰ-﻿]/.test(text)
   }
   const dir = basename(session.cwd) || session.cwd
   function formatRelative(ms: number): string {

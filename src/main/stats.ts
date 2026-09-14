@@ -6,6 +6,7 @@ import {
   statSync,
   writeFileSync
 } from 'node:fs'
+import { HEBREW_CHAR_RE } from '../shared/bidi'
 import { join } from 'node:path'
 import { app } from 'electron'
 
@@ -56,7 +57,6 @@ export type StatsEvent =
   | SessionClosedEvent
   | BookmarkCreatedEvent
 
-const HEBREW_RE = /[֐-׿]/
 
 function eventsFile(): string {
   return join(app.getPath('userData'), 'events.jsonl')
@@ -68,7 +68,7 @@ export function recordPromptSent(sessionId: string, cwd: string, text: string): 
     sessionId,
     cwd,
     len: text.length,
-    hebrew: HEBREW_RE.test(text)
+    hebrew: HEBREW_CHAR_RE.test(text)
   })
 }
 

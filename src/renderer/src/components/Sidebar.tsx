@@ -8,6 +8,7 @@ import {
 import type { SessionMeta, SessionStatus } from '../types'
 import { basename } from '../utils/path'
 import { IS_MAC } from '../utils/platform'
+import { isRtlText as isRtl } from '../../../shared/bidi'
 
 const SESSION_COLORS = ['#7c3aed', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#ef4444', '#8b5cf6', '#14b8a6']
 
@@ -16,11 +17,7 @@ const SESSION_COLORS = ['#7c3aed', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '
 // row doesn't strobe. Released for real once the run stays finished this long.
 const LOCK_GRACE_MS = 3000
 
-const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
 
-function isRtl(text: string): boolean {
-  return RTL_RE.test(text)
-}
 
 interface Props {
   sessions: SessionMeta[]

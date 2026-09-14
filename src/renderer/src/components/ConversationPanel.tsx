@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { isRtlText } from '../../../shared/bidi'
 
 interface Message {
   id: string
@@ -13,7 +14,6 @@ interface Props {
   onClose: () => void
 }
 
-const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/
 const COLLAPSE_LINES = 18
 // The initial backlog is capped in the main process, but appends are unbounded:
 // over a long session the list grew to thousands of bubbles, and because this
@@ -243,7 +243,7 @@ const ConvBubble = memo(function ConvBubble({
   const lines = msg.text.split('\n')
   const isLong = lines.length > COLLAPSE_LINES
   const visibleText = isLong && !expanded ? lines.slice(0, COLLAPSE_LINES).join('\n') : msg.text
-  const rtl = RTL_RE.test(msg.text)
+  const rtl = isRtlText(msg.text)
   const [copied, setCopied] = useState(false)
 
   const onBubbleClick = (): void => {
